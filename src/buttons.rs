@@ -17,16 +17,19 @@ pub const KIND_PROFILE: u8 = 10;
 pub const MOUSE_LEFT: u32 = 0x010000;
 pub const DISABLE: u32 = 0x00ff_ffff;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ButtonInfo {
     /// Position in the config block's button array (offset 20 + slot * 4).
     pub slot: u8,
-    /// Position in the `0x12 0x52` command; the order differs.
+    /// Position in the `0x12 0x52` command. On this firmware it is the same
+    /// index as `slot`.
     pub wire: u8,
     pub name: &'static str,
 }
 
-pub const BUTTONS: [ButtonInfo; 6] = [
+/// The five buttons M HUB exposes for remapping. The DPI button is fixed by
+/// the firmware and is deliberately not included, matching the vendor tool.
+pub const BUTTONS: [ButtonInfo; 5] = [
     ButtonInfo {
         slot: 0,
         wire: 0,
@@ -34,13 +37,13 @@ pub const BUTTONS: [ButtonInfo; 6] = [
     },
     ButtonInfo {
         slot: 1,
-        wire: 2,
-        name: "Right",
+        wire: 1,
+        name: "Middle",
     },
     ButtonInfo {
         slot: 2,
-        wire: 1,
-        name: "Middle",
+        wire: 2,
+        name: "Right",
     },
     ButtonInfo {
         slot: 3,
@@ -51,11 +54,6 @@ pub const BUTTONS: [ButtonInfo; 6] = [
         slot: 4,
         wire: 4,
         name: "Back",
-    },
-    ButtonInfo {
-        slot: 5,
-        wire: 5,
-        name: "DPI",
     },
 ];
 
@@ -486,14 +484,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn wire_order_is_not_the_same_as_config_order() {
+    fn wire_index_matches_config_slot() {
         assert_eq!(slot_for_wire(0), Some(0)); // left
-        assert_eq!(slot_for_wire(1), Some(2)); // middle
-        assert_eq!(slot_for_wire(2), Some(1)); // right
+        assert_eq!(slot_for_wire(1), Some(1)); // middle
+        assert_eq!(slot_for_wire(2), Some(2)); // right
         assert_eq!(slot_for_wire(3), Some(3)); // forward
         assert_eq!(slot_for_wire(4), Some(4)); // back
-        assert_eq!(slot_for_wire(5), Some(5)); // dpi
-        assert_eq!(slot_for_wire(6), None);
+        assert_eq!(slot_for_wire(5), None); // the fixed DPI button
+        assert_eq!(button_info(5), None);
+    }
+
+    #[test]
+    fn buttons_are_in_m_hub_order() {
+        let order: Vec<_> = BUTTONS.iter().map(|b| (b.slot, b.wire, b.name)).collect();
+        assert_eq!(
+            order,
+            vec![
+                (0, 0, "Left"),
+                (1, 1, "Middle"),
+                (2, 2, "Right"),
+                (3, 3, "Forward"),
+                (4, 4, "Back"),
+            ]
+        );
     }
 
     #[test]

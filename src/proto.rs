@@ -16,6 +16,8 @@ pub const REPORT_LONG: u8 = 0x12;
 pub const DPI_STAGES: usize = 6;
 pub const BUTTON_OFFSET: usize = 20;
 pub const BUTTON_SIZE: usize = 4;
+/// Entries in the config block. The firmware exposes only the first five for
+/// remapping; the sixth is reserved and the DPI button is fixed.
 pub const BUTTON_COUNT: usize = 6;
 
 const MIN_GAP: Duration = Duration::from_millis(25);

@@ -33,11 +33,10 @@ no daemon.
   Angle snap                  off
  BUTTONS
   Left button                 Default (native)
-  Right button                Default (native)
   Middle button               Default (native)
+  Right button                Default (native)
   Forward button              Default (native)
   Back button                 Default (native)
-  DPI button                  Default (native)
  PROFILE
   Profile                     1 / 3
   Game mode                   1
@@ -57,9 +56,10 @@ no daemon.
 - **Lift-off distance** (0.7 / 1.0 / 2.0 mm, model dependent).
 - **Debounce** (0–30 ms) and **sleep timeout** (0–60 min, 0 = off).
 - **Sensor flags**: motion sync, ripple control, angle snap.
-- **Button remapping** for all six buttons: native action, mouse buttons,
-  DPI switches, media keys, system actions, profiles, disable, and 142 keyboard
-  keys and shortcuts. The picker filters as you type.
+- **Button remapping** for the five remappable buttons: native action, mouse
+  buttons, DPI switches, media keys, system actions, profiles, disable, and 142
+  keyboard keys and shortcuts. The picker filters as you type. The DPI button
+  is fixed by the firmware — M HUB does not expose it either.
 - **Profiles** 1–3 and **game mode** 1–3.
 - **Backup / restore** of the 63-byte configuration block.
 - **Frame log** (`f`) showing every HID frame sent and received.
@@ -152,7 +152,10 @@ maximum, in steps of 50.
 
 ### Button remapping
 
-Press `Enter` on any row in the **BUTTONS** group. The screen becomes a picker:
+Press `Enter` on any row in the **BUTTONS** group. The group lists the five
+remappable buttons: **Left**, **Middle**, **Right**, **Forward**, and **Back**.
+The **DPI button** is fixed by the firmware and is not offered for remapping,
+just as in M HUB. Press `Enter` on a row and the screen becomes a picker:
 
 | Key | Action |
 | --- | --- |

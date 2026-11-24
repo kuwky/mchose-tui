@@ -323,10 +323,12 @@ impl App {
         }
 
         let mut last_error = None;
-        for attempt in 0..5u64 {
-            sleep(Duration::from_millis(80 * (attempt + 1)));
+        let mut seen = None;
+        for _ in 0..20 {
+            sleep(Duration::from_millis(150));
             match self.mouse.read_config() {
                 Ok(config) => {
+                    seen = Some(config.button(slot as usize));
                     self.config = config;
                     if self.config.button(slot as usize) == (action.kind, action.value) {
                         self.ok(format!("{} button: {}.", info.name, action.name));
@@ -336,7 +338,23 @@ impl App {
                 Err(e) => last_error = Some(e),
             }
         }
-        if let Some(e) = last_error {
+
+        // The firmware can commit a remap slightly after the last poll. A
+        // final read is cheap and turns a late write into a success instead
+        // of a misleading error.
+        self.reload();
+        if self.config.button(slot as usize) == (action.kind, action.value) {
+            self.ok(format!("{} button: {}.", info.name, action.name));
+            return;
+        }
+
+        if let Some((kind, value)) = seen {
+            self.err(format!(
+                "The mouse kept {} for the {} button.",
+                buttons::describe(kind, value),
+                info.name
+            ));
+        } else if let Some(e) = last_error {
             self.err(format!("{} button: read-back failed ({e})", info.name));
         } else {
             self.err(format!(
@@ -344,7 +362,6 @@ impl App {
                 info.name
             ));
         }
-        self.reload();
     }
 
     fn action_count(&self) -> usize {
