@@ -1,0 +1,4 @@
+# MCHOSE mice: allow the logged-in desktop user to open the vendor
+# configuration interface. Without this the hidraw nodes are root:root 0600.
+KERNEL=="hidraw*", ATTRS{idVendor}=="5253", MODE="0660", GROUP="input", TAG+="uaccess"
+KERNEL=="hidraw*", ATTRS{idVendor}=="3837", MODE="0660", GROUP="input", TAG+="uaccess"
