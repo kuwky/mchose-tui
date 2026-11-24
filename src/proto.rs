@@ -14,6 +14,9 @@ use std::time::{Duration, Instant};
 pub const REPORT_SHORT: u8 = 0x11;
 pub const REPORT_LONG: u8 = 0x12;
 pub const DPI_STAGES: usize = 6;
+pub const BUTTON_OFFSET: usize = 20;
+pub const BUTTON_SIZE: usize = 4;
+pub const BUTTON_COUNT: usize = 6;
 
 const MIN_GAP: Duration = Duration::from_millis(25);
 
@@ -322,6 +325,25 @@ impl Config {
         self.body[19] = minutes;
     }
 
+    /// A button entry is four bytes: `(slot << 4) | kind`, then the 24-bit
+    /// action value big-endian.
+    pub fn button(&self, slot: usize) -> (u8, u32) {
+        let at = BUTTON_OFFSET + slot * BUTTON_SIZE;
+        let kind = self.body[at] & 0x0f;
+        let value = ((self.body[at + 1] as u32) << 16)
+            | ((self.body[at + 2] as u32) << 8)
+            | self.body[at + 3] as u32;
+        (kind, value)
+    }
+
+    pub fn set_button(&mut self, slot: usize, kind: u8, value: u32) {
+        let at = BUTTON_OFFSET + slot * BUTTON_SIZE;
+        self.body[at] = ((slot as u8) << 4) | (kind & 0x0f);
+        self.body[at + 1] = (value >> 16) as u8;
+        self.body[at + 2] = (value >> 8) as u8;
+        self.body[at + 3] = value as u8;
+    }
+
     pub fn rotate(&self) -> u8 {
         self.body[49]
     }
@@ -434,6 +456,29 @@ pub fn set_game_mode(dev: &HidRaw, mode: u8) -> io::Result<()> {
     send(dev, REPORT_SHORT, &[0x02, mode])
 }
 
+/// `0x12 0x52`: remap one button. `wire` is the index used by this command,
+/// which differs from the config block slot order (see `buttons::BUTTONS`).
+/// The next byte is reserved, then the action category and the 24-bit value
+/// big-endian.
+pub fn set_button(dev: &HidRaw, wire: u8, kind: u8, value: u32) -> io::Result<()> {
+    if wire as usize >= BUTTON_COUNT {
+        return Err(invalid(format!("button index {wire} out of range")));
+    }
+    send(
+        dev,
+        REPORT_LONG,
+        &[
+            0x52,
+            wire,
+            0,
+            kind & 0x0f,
+            (value >> 16) as u8,
+            (value >> 8) as u8,
+            value as u8,
+        ],
+    )
+}
+
 /// Read `0x11 0x03`: bond, vid, pid, link, game mode.
 pub fn basics(dev: &HidRaw) -> io::Result<(u16, u16, u8, u8)> {
     let d = request(dev, REPORT_SHORT, &[0x03])?;
@@ -482,6 +527,22 @@ mod tests {
         c.set_sensor(0x14);
         assert_eq!(c.perf_flags(), (true, false, true));
         assert_eq!(c.sensor() & 1, 1);
+    }
+
+    #[test]
+    fn button_fields_roundtrip() {
+        let mut c = Config { body: [0u8; 63] };
+        c.set_button(0, 0, 0);
+        c.set_button(1, 1, 0x020000);
+        c.set_button(5, 10, 0x040000);
+        assert_eq!(c.button(0), (0, 0));
+        assert_eq!(c.button(1), (1, 0x020000));
+        assert_eq!(c.button(5), (10, 0x040000));
+        // The high nibble of the type byte identifies the slot, and the
+        // value is stored big-endian, as the firmware expects.
+        assert_eq!(&c.body[20..24], &[0x00, 0x00, 0x00, 0x00]);
+        assert_eq!(&c.body[24..28], &[0x11, 0x02, 0x00, 0x00]);
+        assert_eq!(&c.body[40..44], &[0x5a, 0x04, 0x00, 0x00]);
     }
 
     #[test]

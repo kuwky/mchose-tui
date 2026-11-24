@@ -1,4 +1,5 @@
 mod app;
+mod buttons;
 mod hid;
 mod mouse;
 mod proto;
@@ -30,6 +31,9 @@ Keys:
   Enter or Space      apply/edit    r                   refresh
   b                   backup        f                   frame log
   q                   quit
+
+Press Enter on a button row to remap it. In the picker, type to filter,
+Up/Down to choose, Enter to apply, Esc to cancel.
 
 The mouse's configuration interface is usually root-only. Install the
 included udev rule once (./install.sh does it), then replug the mouse.

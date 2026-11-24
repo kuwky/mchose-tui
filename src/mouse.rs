@@ -1,5 +1,6 @@
 //! Device model table and the two backends: real hidraw and an in-memory demo.
 
+use crate::buttons;
 use crate::hid::{self, HidRaw, Node};
 use crate::proto::{self, Config, Identity};
 use std::io;
@@ -50,6 +51,7 @@ pub trait Mouse {
     fn write_config(&mut self, config: &Config) -> io::Result<()>;
     fn confirm_config(&mut self, config: &Config) -> io::Result<()>;
     fn set_rate(&mut self, index: u8) -> io::Result<()>;
+    fn set_button(&mut self, wire: u8, kind: u8, value: u32) -> io::Result<()>;
     fn set_flags(
         &mut self,
         lod: u8,
@@ -161,6 +163,10 @@ impl Mouse for RealMouse {
         proto::set_report_rate(&self.dev, index, index)
     }
 
+    fn set_button(&mut self, wire: u8, kind: u8, value: u32) -> io::Result<()> {
+        proto::set_button(&self.dev, wire, kind, value)
+    }
+
     fn set_flags(
         &mut self,
         lod: u8,
@@ -270,6 +276,9 @@ impl DemoMouse {
         cfg.body[18] = 4;
         cfg.body[19] = 10;
         cfg.body[49] = 30;
+        for slot in 0..proto::BUTTON_COUNT {
+            cfg.set_button(slot, buttons::KIND_NATIVE, 0);
+        }
         Self {
             cfg,
             lod: 1,
@@ -319,6 +328,17 @@ impl Mouse for DemoMouse {
     fn set_rate(&mut self, index: u8) -> io::Result<()> {
         self.cfg.body[1] = (index << 4) | (self.cfg.body[1] & 0x0F);
         self.cfg.body[2] = (index << 4) | (self.cfg.body[2] & 0x0F);
+        Ok(())
+    }
+
+    fn set_button(&mut self, wire: u8, kind: u8, value: u32) -> io::Result<()> {
+        let slot = buttons::slot_for_wire(wire).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("button index {wire} out of range"),
+            )
+        })?;
+        self.cfg.set_button(slot as usize, kind, value);
         Ok(())
     }
 

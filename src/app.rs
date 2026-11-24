@@ -1,5 +1,6 @@
 //! Application state, key handling and the renderer.
 
+use crate::buttons;
 use crate::mouse::{model_info, DemoMouse, ModelInfo, Mouse, RealMouse};
 use crate::proto::{self, Config, Identity, DPI_STAGES};
 use crate::state;
@@ -37,6 +38,7 @@ enum Row {
     Dpi(u8),
     Rate,
     Lod,
+    Button(u8),
     Debounce,
     Sleep,
     Motion,
@@ -62,6 +64,12 @@ struct Edit {
     buffer: String,
 }
 
+struct Remap {
+    slot: u8,
+    query: String,
+    selected: usize,
+}
+
 pub struct Options {
     pub demo: bool,
     pub device: Option<String>,
@@ -78,6 +86,7 @@ pub struct App {
     lod_index: u8,
     selected: usize,
     edit: Option<Edit>,
+    remap: Option<Remap>,
     message: Message,
     confirm_restore: bool,
     show_log: bool,
@@ -128,6 +137,7 @@ impl App {
             lod_index,
             selected: 0,
             edit: None,
+            remap: None,
             message: Message::default(),
             confirm_restore: false,
             show_log: false,
@@ -155,6 +165,13 @@ impl App {
 
     /// Returns true when the app should quit.
     pub fn handle_key(&mut self, key: Key) -> bool {
+        if self.remap.is_some() {
+            if matches!(key, Key::CtrlC) {
+                return true;
+            }
+            self.handle_remap(key);
+            return false;
+        }
         if self.edit.is_some() {
             self.handle_edit(key);
             return false;
@@ -211,6 +228,125 @@ impl App {
         }
     }
 
+    fn handle_remap(&mut self, key: Key) {
+        let Some(mut remap) = self.remap.take() else {
+            return;
+        };
+        let matches = buttons::filter(&remap.query);
+        match key {
+            Key::Esc => {
+                self.info("Remap cancelled.");
+                return;
+            }
+            Key::Enter => {
+                if let Some(action) = matches.get(remap.selected).copied() {
+                    self.apply_button(remap.slot, action);
+                } else {
+                    self.remap = Some(remap);
+                    self.info("No action selected.");
+                }
+                return;
+            }
+            Key::Up => remap.selected = remap.selected.saturating_sub(1),
+            Key::Down => {
+                if remap.selected + 1 < matches.len() {
+                    remap.selected += 1;
+                }
+            }
+            Key::PgUp => remap.selected = remap.selected.saturating_sub(10),
+            Key::PgDn => {
+                remap.selected = (remap.selected + 10).min(matches.len().saturating_sub(1))
+            }
+            Key::Home => remap.selected = 0,
+            Key::End => remap.selected = matches.len().saturating_sub(1),
+            Key::Backspace => {
+                remap.query.pop();
+                remap.selected = 0;
+            }
+            Key::Space => {
+                remap.query.push(' ');
+                remap.selected = 0;
+            }
+            Key::Char(c) if !c.is_control() => {
+                remap.query.push(c);
+                remap.selected = 0;
+            }
+            _ => {}
+        }
+        self.remap = Some(remap);
+    }
+
+    fn open_remap(&mut self, slot: u8) {
+        let Some(info) = buttons::button_info(slot) else {
+            return;
+        };
+        self.remap = Some(Remap {
+            slot,
+            query: String::new(),
+            selected: 0,
+        });
+        self.info(format!(
+            "Remapping the {} button: type to filter, Enter to apply, Esc to cancel.",
+            info.name
+        ));
+    }
+
+    fn apply_button(&mut self, slot: u8, action: buttons::Action) {
+        self.remap = None;
+        let Some(info) = buttons::button_info(slot).copied() else {
+            return;
+        };
+        let before = match self.mouse.read_config() {
+            Ok(c) => c,
+            Err(e) => {
+                self.err(format!("Could not read the mouse: {e}"));
+                return;
+            }
+        };
+        let mut wanted = before.clone();
+        wanted.set_button(slot as usize, action.kind, action.value);
+        if left_click_count(&wanted) == 0 {
+            self.err(
+                "Refusing to remove the last left click. Map another button to \
+                 Left click first.",
+            );
+            return;
+        }
+        if let Err(e) = self.backup_once(&before) {
+            self.err(format!("Could not save the original config: {e}"));
+            return;
+        }
+        if let Err(e) = self.mouse.set_button(info.wire, action.kind, action.value) {
+            self.err(format!("{} button: failed ({e})", info.name));
+            self.reload();
+            return;
+        }
+
+        let mut last_error = None;
+        for attempt in 0..5u64 {
+            sleep(Duration::from_millis(80 * (attempt + 1)));
+            match self.mouse.read_config() {
+                Ok(config) => {
+                    self.config = config;
+                    if self.config.button(slot as usize) == (action.kind, action.value) {
+                        self.ok(format!("{} button: {}.", info.name, action.name));
+                        return;
+                    }
+                }
+                Err(e) => last_error = Some(e),
+            }
+        }
+        if let Some(e) = last_error {
+            self.err(format!("{} button: read-back failed ({e})", info.name));
+        } else {
+            self.err(format!(
+                "The mouse did not take that {} button mapping.",
+                info.name
+            ));
+        }
+        self.reload();
+    }
+
     fn action_count(&self) -> usize {
         self.items().iter().filter(|i| i.row.is_some()).count()
     }
@@ -233,6 +369,7 @@ impl App {
         };
         match row {
             Row::Dpi(stage) => self.start_edit(stage),
+            Row::Button(slot) => self.open_remap(slot),
             Row::Backup => self.backup(),
             Row::Restore => self.restore_prompt(),
             Row::Log => self.show_log = !self.show_log,
@@ -843,6 +980,16 @@ impl App {
             value: on_off(snap),
         });
 
+        for info in buttons::BUTTONS {
+            let (kind, value) = self.config.button(info.slot as usize);
+            items.push(Item {
+                group: "BUTTONS",
+                row: Some(Row::Button(info.slot)),
+                label: format!("{} button", info.name),
+                value: buttons::describe(kind, value),
+            });
+        }
+
         items.push(Item {
             group: "PROFILE",
             row: Some(Row::Profile),
@@ -935,27 +1082,91 @@ impl App {
         (lines, selected_line)
     }
 
+    fn remap_view(&self, remap: &Remap, width: usize, height: usize) -> Vec<String> {
+        let actions = buttons::filter(&remap.query);
+        let mut lines = Vec::new();
+        if height == 0 {
+            return lines;
+        }
+
+        let name = buttons::button_info(remap.slot)
+            .map(|b| b.name)
+            .unwrap_or("?");
+        lines.push(style(
+            &fit(
+                &format!(" REMAP {} BUTTON", name.to_ascii_uppercase()),
+                width,
+            ),
+            "\x1b[1;36m",
+            self.color,
+        ));
+        if lines.len() < height {
+            let filter = if remap.query.is_empty() {
+                "type to filter".to_string()
+            } else {
+                format!("{}_", remap.query)
+            };
+            lines.push(fit(&format!(" Filter: {filter}"), width));
+        }
+        if lines.len() < height {
+            lines.push(style(&"─".repeat(width), "\x1b[2m", self.color));
+        }
+
+        let visible = height.saturating_sub(lines.len());
+        let start = remap
+            .selected
+            .saturating_sub(visible / 2)
+            .min(actions.len().saturating_sub(visible));
+        for (i, action) in actions.iter().enumerate().skip(start).take(visible) {
+            let marker = if i == remap.selected { "> " } else { "  " };
+            let text = fit(
+                &format!("{marker}{:<8}  {}", action.group, action.name),
+                width,
+            );
+            if i == remap.selected {
+                lines.push(style(&text, "\x1b[7m", self.color));
+            } else {
+                lines.push(text);
+            }
+        }
+        while lines.len() < height {
+            lines.push(fit("", width));
+        }
+        lines.truncate(height);
+        lines
+    }
+
     pub fn render(&self, width: usize, height: usize) -> String {
         let w = width.max(40);
         let h = height.max(12);
         let label_w = if w >= 80 { 26 } else { 18 };
-        let (content, selected_line) = self.display_items(w, label_w);
 
         let available = h.saturating_sub(5);
-        let log_total = if self.show_log {
+        let log_total = if self.show_log && self.remap.is_none() {
             (available.saturating_sub(3)).min((h / 4).clamp(2, 7) + 1)
         } else {
             0
         };
         let main_h = available.saturating_sub(log_total).max(1);
-        let start = if content.len() <= main_h {
-            0
+
+        let main_lines = if let Some(remap) = &self.remap {
+            self.remap_view(remap, w, main_h)
         } else {
-            let sel = selected_line.unwrap_or(0);
-            let start = if sel >= main_h { sel + 1 - main_h } else { 0 };
-            start.min(content.len() - main_h)
+            let (content, selected_line) = self.display_items(w, label_w);
+            let start = if content.len() <= main_h {
+                0
+            } else {
+                let sel = selected_line.unwrap_or(0);
+                let start = if sel >= main_h { sel + 1 - main_h } else { 0 };
+                start.min(content.len() - main_h)
+            };
+            let end = (start + main_h).min(content.len());
+            let mut out = content[start..end].to_vec();
+            for _ in (end - start)..main_h {
+                out.push(fit("", w));
+            }
+            out
         };
-        let end = (start + main_h).min(content.len());
 
         let mut lines = Vec::new();
         let left = format!(" MCHOSE TUI {}  ·  {}", VERSION, self.mouse.name());
@@ -977,11 +1188,8 @@ impl App {
         lines.push(style(&join_lr(&left, &right, w), "\x1b[1;36m", self.color));
         lines.push(style(&"─".repeat(w), "\x1b[2m", self.color));
 
-        for line in &content[start..end] {
+        for line in &main_lines {
             lines.push(line.clone());
-        }
-        for _ in (end - start)..main_h {
-            lines.push(fit("", w));
         }
 
         if self.show_log {
@@ -1008,7 +1216,23 @@ impl App {
         }
 
         lines.push(style(&"─".repeat(w), "\x1b[2m", self.color));
-        let (status, code) = if let Some(edit) = &self.edit {
+        let (status, code) = if let Some(remap) = &self.remap {
+            let name = buttons::button_info(remap.slot)
+                .map(|b| b.name)
+                .unwrap_or("?");
+            let filter = if remap.query.is_empty() {
+                "(all)".to_string()
+            } else {
+                remap.query.clone()
+            };
+            (
+                format!(
+                    " Remap {name}: filter {filter}  ·  {} matches  ·  Enter apply, Esc cancel",
+                    buttons::filter(&remap.query).len()
+                ),
+                "\x1b[33m",
+            )
+        } else if let Some(edit) = &self.edit {
             (
                 format!(
                     " Editing DPI stage {}: {}_   (Enter apply, Esc cancel)",
@@ -1033,14 +1257,12 @@ impl App {
             )
         };
         lines.push(style(&fit(&status, w), code, self.color));
-        lines.push(style(
-            &fit(
-                " Up/Down move  Left/Right adjust  Enter apply  r refresh  b backup  q quit",
-                w,
-            ),
-            "\x1b[2m",
-            self.color,
-        ));
+        let keys = if self.remap.is_some() {
+            " Type to filter  Up/Down move  PgUp/PgDn jump  Enter apply  Esc cancel"
+        } else {
+            " Up/Down move  Left/Right adjust  Enter edit/remap  r refresh  b backup  q quit"
+        };
+        lines.push(style(&fit(keys, w), "\x1b[2m", self.color));
         lines.join("\r\n")
     }
 }
@@ -1173,6 +1395,18 @@ fn on_off(value: bool) -> String {
     }
 }
 
+/// A button counts as left click when it is the left button's native action or
+/// any button explicitly mapped to `mouse.left`.
+fn left_click_count(config: &Config) -> usize {
+    (0..buttons::BUTTONS.len())
+        .filter(|&slot| {
+            let (kind, value) = config.button(slot);
+            (slot == 0 && kind == buttons::KIND_NATIVE && value == 0)
+                || (kind == buttons::KIND_MOUSE && value == buttons::MOUSE_LEFT)
+        })
+        .count()
+}
+
 fn link_name(mode: u8) -> &'static str {
     match mode {
         0 => "wired",
@@ -1190,4 +1424,33 @@ fn battery_bar(percent: u8, width: usize) -> String {
         "█".repeat(filled),
         "░".repeat(width.saturating_sub(filled))
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn native_config() -> Config {
+        let mut c = Config { body: [0u8; 63] };
+        for slot in 0..buttons::BUTTONS.len() {
+            c.set_button(slot, buttons::KIND_NATIVE, 0);
+        }
+        c
+    }
+
+    #[test]
+    fn the_last_left_click_cannot_be_removed() {
+        let mut c = native_config();
+        assert_eq!(left_click_count(&c), 1);
+
+        // Mapping another button to left click makes the original expendable.
+        c.set_button(1, buttons::KIND_MOUSE, buttons::MOUSE_LEFT);
+        assert_eq!(left_click_count(&c), 2);
+        c.set_button(0, buttons::KIND_KEYBOARD, 0x000400);
+        assert_eq!(left_click_count(&c), 1);
+
+        // Taking the only remaining left click away leaves none.
+        c.set_button(1, buttons::KIND_MOUSE, 0x020000);
+        assert_eq!(left_click_count(&c), 0);
+    }
 }

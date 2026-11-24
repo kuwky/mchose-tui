@@ -3,8 +3,9 @@
 A tiny, dependency-free terminal UI for configuring **MCHOSE** gaming mice on Linux.
 
 DPI stages, polling rate, lift-off distance, debounce, sleep, motion sync,
-ripple control, angle snap, profiles, game mode, battery and charging — all
-from one keyboard-driven screen. No vendor driver, no browser, no daemon.
+ripple control, angle snap, button remapping, profiles, game mode, battery and
+charging — all from one keyboard-driven screen. No vendor driver, no browser,
+no daemon.
 
 ```
  MCHOSE TUI 0.1.0  ·  MCHOSE L7 Ultra (demo)                               2.4 GHz  ·  87% charging
@@ -30,6 +31,13 @@ from one keyboard-driven screen. No vendor driver, no browser, no daemon.
   Motion sync                 on
   Ripple control              off
   Angle snap                  off
+ BUTTONS
+  Left button                 Default (native)
+  Right button                Default (native)
+  Middle button               Default (native)
+  Forward button              Default (native)
+  Back button                 Default (native)
+  DPI button                  Default (native)
  PROFILE
   Profile                     1 / 3
   Game mode                   1
@@ -38,7 +46,7 @@ from one keyboard-driven screen. No vendor driver, no browser, no daemon.
   Backup config               save a copy of the current config
 ────────────────────────────────────────────────────────────────────────────────────────────────────
  Ready. Changes are written immediately and verified.
- Up/Down move  Left/Right adjust  Enter apply  r refresh  b backup  q quit
+ Up/Down move  Left/Right adjust  Enter edit/remap  r refresh  b backup  q quit
 ```
 
 ## Features
@@ -49,6 +57,9 @@ from one keyboard-driven screen. No vendor driver, no browser, no daemon.
 - **Lift-off distance** (0.7 / 1.0 / 2.0 mm, model dependent).
 - **Debounce** (0–30 ms) and **sleep timeout** (0–60 min, 0 = off).
 - **Sensor flags**: motion sync, ripple control, angle snap.
+- **Button remapping** for all six buttons: native action, mouse buttons,
+  DPI switches, media keys, system actions, profiles, disable, and 142 keyboard
+  keys and shortcuts. The picker filters as you type.
 - **Profiles** 1–3 and **game mode** 1–3.
 - **Backup / restore** of the 63-byte configuration block.
 - **Frame log** (`f`) showing every HID frame sent and received.
@@ -129,7 +140,7 @@ mchose-tui --no-color
 | --- | --- |
 | `Up` / `Down`, `k` / `j` | move the selection |
 | `Left` / `Right`, `h` / `l` | adjust the selected value |
-| `Enter` / `Space` | apply, toggle, edit, or run an action |
+| `Enter` / `Space` | apply, toggle, edit, remap, or run an action |
 | `r` | re-read everything from the mouse |
 | `b` | save a backup of the current config |
 | `f` | show / hide the HID frame log |
@@ -139,10 +150,34 @@ DPI values are edited inline: press `Enter` on a stage, type the new value, and
 press `Enter` again. `Esc` cancels. Values must be between 50 and the model's
 maximum, in steps of 50.
 
+### Button remapping
+
+Press `Enter` on any row in the **BUTTONS** group. The screen becomes a picker:
+
+| Key | Action |
+| --- | --- |
+| letters / digits / space | filter the action list (also matches the group) |
+| `Backspace` | delete the last filter character |
+| `Up` / `Down`, `PgUp` / `PgDn`, `Home` / `End` | move through the results |
+| `Enter` | write the selected action to the mouse |
+| `Esc` | cancel without writing |
+
+Actions are grouped as **Default**, **Mouse**, **DPI**, **Media**, **System**,
+**Keyboard**, **Profile**, and **Other** (which holds *Disable*). The mapping is
+written with the dedicated `0x12 0x52` command and then read back from the
+config block, so the row shows what the mouse actually stored.
+
+The tool refuses to remove the **last left-click** button. If you want to move
+left click elsewhere, first map another button to **Left click**, then change
+the original one. The config backup made before the first write can always be
+restored from **Tools → Restore original**.
+
 ## Safety
 
 - Every write is a read-modify-write of the full 63-byte config block, then
-  polled back until the mouse confirms it.
+  polled back until the mouse confirms it. Button remaps use the dedicated
+  `0x12 0x52` command and are read back from the same config block.
+- The remap picker refuses to leave the mouse without a left click.
 - The first write of any kind saves the untouched config to
   `~/.local/state/mchose-tui/config.original.bin` (never overwritten).
 - **Restore original** in the Tools group writes that file back; it asks for a
