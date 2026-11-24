@@ -11,6 +11,9 @@ pub struct ModelInfo {
     pub lod: Vec<f32>,
     pub rates: Vec<u32>,
     pub default_lod: u8,
+    /// True when the mouse mirrors the LOD index in the low two bits of the
+    /// config block's sensor byte, so it can be read back.
+    pub lod_in_sensor: bool,
 }
 
 /// Model quirks. The protocol is shared, but the DPI ceiling, the LOD list and
@@ -19,10 +22,10 @@ pub fn model_info(pid: u16, name: &str) -> ModelInfo {
     let lower = name.to_ascii_lowercase();
     let is_42000 = pid == 0x00b1 || lower.contains("ultra");
     let dpi_max = if is_42000 { 42000 } else { 26000 };
-    let (lod, default_lod) = if is_42000 {
-        (vec![0.7, 1.0, 2.0], 1)
+    let (lod, default_lod, lod_in_sensor) = if is_42000 {
+        (vec![0.7, 1.0, 2.0], 1, true)
     } else {
-        (vec![1.0, 2.0], 0)
+        (vec![1.0, 2.0], 0, false)
     };
     let rates = if lower.contains("1k") || lower.contains("1 k") {
         vec![125, 500, 1000]
@@ -34,6 +37,7 @@ pub fn model_info(pid: u16, name: &str) -> ModelInfo {
         lod,
         rates,
         default_lod,
+        lod_in_sensor,
     }
 }
 
@@ -327,11 +331,12 @@ impl Mouse for DemoMouse {
         _rotate: u8,
     ) -> io::Result<()> {
         self.lod = lod;
-        let wanted = (self.cfg.sensor() & !0x1C)
+        let wanted = (self.cfg.sensor() & !0x1F)
+            | (lod & 0x03)
             | ((ripple as u8) << 2)
             | ((angle_snap as u8) << 3)
             | ((motion_sync as u8) << 4);
-        self.cfg.set_sensor(wanted);
+        self.cfg.body[17] = wanted;
         Ok(())
     }
 
@@ -360,6 +365,7 @@ mod tests {
         assert_eq!(m.dpi_max, 42000);
         assert_eq!(m.lod.len(), 3);
         assert_eq!(m.default_lod, 1);
+        assert!(m.lod_in_sensor);
         assert_eq!(m.rates.last().copied(), Some(8000));
     }
 
@@ -368,5 +374,6 @@ mod tests {
         let m = model_info(0x00b0, "MCHOSE L7 Pro");
         assert_eq!(m.dpi_max, 26000);
         assert_eq!(m.lod, vec![1.0, 2.0]);
+        assert!(!m.lod_in_sensor);
     }
 }

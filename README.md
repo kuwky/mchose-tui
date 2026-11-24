@@ -26,7 +26,7 @@ from one keyboard-driven screen. No vendor driver, no browser, no daemon.
   Debounce                    4 ms
   Sleep                       10 min
  SENSOR
-  Lift-off distance           1.0 mm   (write-only)
+  Lift-off distance           1.0 mm
   Motion sync                 on
   Ripple control              off
   Angle snap                  off
@@ -55,9 +55,11 @@ from one keyboard-driven screen. No vendor driver, no browser, no daemon.
 - **Demo mode** (`--demo`) to explore the UI without hardware.
 
 Every change is read back and compared with what was requested, so the screen
-shows what the mouse actually holds. Lift-off distance is the one exception:
-the firmware has no read command for it, so the displayed value is the last one
-this tool wrote (kept in `~/.local/state/mchose-tui/`).
+shows what the mouse actually holds. On the 42 000 DPI models (L7 Ultra and
+friends) the lift-off index is mirrored in the config block's sensor byte and
+is read back like everything else. On the 26 000 DPI models the firmware has no
+read command for it, so the displayed value is the last one this tool wrote
+(kept in `~/.local/state/mchose-tui/`).
 
 ## Supported mice
 
@@ -70,7 +72,9 @@ That covers, at least:
 The model is identified from the HID name and product ID, which selects the DPI
 ceiling, the LOD list and the polling-rate list. An L7 Ultra (`5253:00b1`) gets
 42 000 DPI and 0.7/1.0/2.0 mm; other models default to 26 000 DPI and
-1.0/2.0 mm. Unknown models still work with those safe defaults.
+1.0/2.0 mm. Unknown models still work with those safe defaults. The 42 000 DPI
+models also mirror the LOD index in the sensor byte, so it is read back instead
+of being remembered locally.
 
 **Not supported:** the **A5 / AX5 Pro** family (`2023:...`, usage page `0xFFFF`,
 65-byte frames) and the **G3** family (interrupt pipes, no feature reports).
@@ -168,9 +172,10 @@ The receiver or sensor does not support that value. The error line shows what
 the mouse reported. 1K links reject 2K–8K rates.
 
 **Lift-off distance looks wrong**
-It is write-only. The value shown is the last value this tool wrote, not
-something read back from the mouse. The mouse may have had a different value
-before the first run.
+On the 26 000 DPI models it is write-only: the value shown is the last value
+this tool wrote, not something read back from the mouse. The mouse may have had
+a different value before the first run. On the 42 000 DPI models the value is
+read back from the config block, so the screen shows the real index.
 
 ## Notes
 

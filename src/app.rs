@@ -110,6 +110,10 @@ impl App {
         let game_mode = mouse.game_mode().unwrap_or(0);
         let lod_index = if demo {
             model.default_lod
+        } else if model.lod_in_sensor {
+            config
+                .lod_index()
+                .min(model.lod.len().saturating_sub(1) as u8)
         } else {
             state::load_lod(identity.pid, model.default_lod)
                 .min(model.lod.len().saturating_sub(1) as u8)
@@ -357,9 +361,19 @@ impl App {
     fn reload(&mut self) {
         if let Ok(config) = self.mouse.read_config() {
             self.config = config;
+            self.sync_lod_from_config();
         }
         if let Ok(game) = self.mouse.game_mode() {
             self.game_mode = game;
+        }
+    }
+
+    /// On models that mirror LOD in the sensor byte, the config block is the
+    /// source of truth; on the others the last written index is all we have.
+    fn sync_lod_from_config(&mut self) {
+        if self.model.lod_in_sensor {
+            let max = self.model.lod.len().saturating_sub(1) as u8;
+            self.lod_index = self.config.lod_index().min(max);
         }
     }
 
@@ -455,11 +469,27 @@ impl App {
                     self.err("The sensor flags did not stick.");
                     return;
                 }
-                if lod != self.lod_index {
-                    self.lod_index = lod;
+                let max = self.model.lod.len().saturating_sub(1) as u8;
+                let actual = if self.model.lod_in_sensor {
+                    self.config.lod_index().min(max)
+                } else {
+                    lod
+                };
+                if self.model.lod_in_sensor && actual != lod {
+                    self.lod_index = actual;
                     if !self.demo {
-                        state::save_lod(self.identity.pid, lod);
+                        state::save_lod(self.identity.pid, actual);
                     }
+                    self.err(format!(
+                        "Lift-off: the mouse kept {:.1} mm, not {:.1} mm.",
+                        self.model.lod.get(actual as usize).copied().unwrap_or(0.0),
+                        self.model.lod.get(lod as usize).copied().unwrap_or(0.0)
+                    ));
+                    return;
+                }
+                self.lod_index = actual;
+                if !self.demo {
+                    state::save_lod(self.identity.pid, actual);
                 }
                 self.ok("Sensor settings applied.");
             }
@@ -563,7 +593,10 @@ impl App {
             }
         }
         match self.mouse.read_config() {
-            Ok(config) => self.config = config,
+            Ok(config) => {
+                self.config = config;
+                self.sync_lod_from_config();
+            }
             Err(e) => errors.push(format!("config: {e}")),
         }
         match self.mouse.game_mode() {
@@ -784,7 +817,11 @@ impl App {
             group: "SENSOR",
             row: Some(Row::Lod),
             label: "Lift-off distance".into(),
-            value: format!("{lod:.1} mm   (write-only)"),
+            value: if self.model.lod_in_sensor {
+                format!("{lod:.1} mm")
+            } else {
+                format!("{lod:.1} mm   (write-only)")
+            },
         });
         let (ripple, snap, sync) = self.config.perf_flags();
         items.push(Item {

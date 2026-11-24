@@ -296,6 +296,12 @@ impl Config {
         self.body[17]
     }
 
+    /// The LOD index lives in the low two bits of the sensor byte on the
+    /// 42 000 DPI models. It is updated by `0x11 0x42` and can be read back.
+    pub fn lod_index(&self) -> u8 {
+        self.body[17] & 0x03
+    }
+
     pub fn set_sensor(&mut self, v: u8) {
         self.body[17] = v | (self.body[17] & SENSOR_OWNED_BITS);
     }
@@ -329,6 +335,24 @@ impl Config {
 
 /// `0x11 0x42`: lift-off, ripple, angle snap, motion sync, rotation.
 /// Turning a flag off needs the config-block write too, so reconcile.
+fn reconciled_sensor(
+    before: u8,
+    after: u8,
+    ripple: bool,
+    angle_snap: bool,
+    motion_sync: bool,
+) -> u8 {
+    // Bits 0-1 carry the LOD index on the 42 000 DPI models; keep whatever
+    // `0x42` just wrote there. Bits 5-7 are the sensor performance mode, which
+    // this tool does not manage, so keep them from before the command. Only
+    // replace the three flag bits in the middle.
+    (before & 0xE0)
+        | (after & 0x03)
+        | ((ripple as u8) << 2)
+        | ((angle_snap as u8) << 3)
+        | ((motion_sync as u8) << 4)
+}
+
 pub fn set_flags(
     dev: &HidRaw,
     lod: u8,
@@ -338,6 +362,11 @@ pub fn set_flags(
     rotate: u8,
 ) -> io::Result<()> {
     let before = Config::read(dev)?;
+    // The `gameMode` argument of `0x42` carries the sensor mode in bits 6-7 of
+    // the config byte. Send the current value so changing a flag does not
+    // silently reset the performance mode.
+    let game_mode = (before.sensor() >> 6) & 0x03;
+    let rotate_open = u8::from(rotate != 0);
     send(
         dev,
         REPORT_SHORT,
@@ -349,18 +378,33 @@ pub fn set_flags(
             motion_sync as u8,
             0,
             0,
-            0,
-            0,
+            game_mode,
+            rotate_open,
             rotate,
         ],
     )?;
     sleep(Duration::from_millis(120));
 
-    let wanted = (before.sensor() & !0x1C)
-        | ((ripple as u8) << 2)
-        | ((angle_snap as u8) << 3)
-        | ((motion_sync as u8) << 4);
+    // `0x42` also updates the LOD index in the low two bits of the sensor
+    // byte on the 42 000 DPI models. Reconcile the flags against the *new*
+    // sensor byte: computing them from the pre-write block and then writing
+    // that block back would silently restore the old LOD index.
     let mut after = Config::read(dev)?;
+    for _ in 0..4 {
+        if after.lod_index() == lod & 0x03 {
+            break;
+        }
+        sleep(Duration::from_millis(60));
+        after = Config::read(dev)?;
+    }
+
+    let wanted = reconciled_sensor(
+        before.sensor(),
+        after.sensor(),
+        ripple,
+        angle_snap,
+        motion_sync,
+    );
     if after.sensor() == wanted {
         return Ok(());
     }
@@ -443,5 +487,24 @@ mod tests {
     #[test]
     fn hex_is_spaced() {
         assert_eq!(hex(&[0x11, 0xab, 0x00]), "11 ab 00");
+    }
+
+    #[test]
+    fn flag_reconciliation_keeps_the_lod_bits() {
+        // before/after: motion-sync off, LOD index 2, performance mode 2.
+        let s = reconciled_sensor(0x8e, 0x8e, true, true, false);
+        assert_eq!(s & 0x03, 2, "LOD index must survive the flag write");
+        assert_eq!(s & 0x1C, 0x0C, "ripple and angle snap are set");
+        assert_eq!(s & 0xE0, 0x80, "sensor mode must survive the flag write");
+    }
+
+    #[test]
+    fn flag_reconciliation_restores_the_mode_even_on_a_bad_readback() {
+        // The mouse occasionally reports the mode bits cleared right after
+        // 0x42; the config write must put them back rather than accept them.
+        let s = reconciled_sensor(0x8e, 0x1e, true, true, true);
+        assert_eq!(s & 0xE0, 0x80);
+        assert_eq!(s & 0x03, 2);
+        assert_eq!(s & 0x1C, 0x1C);
     }
 }
