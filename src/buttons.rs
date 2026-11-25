@@ -80,6 +80,13 @@ const NATIVE_ACTIONS: &[Action] = &[Action {
     value: 0,
 }];
 
+const MACRO_ACTIONS: &[Action] = &[Action {
+    group: "Macro",
+    name: "Create / edit macro…",
+    kind: KIND_MACRO,
+    value: 0,
+}];
+
 const MOUSE_ACTIONS: &[Action] = &[
     Action {
         group: "Mouse",
@@ -262,6 +269,7 @@ const OTHER_ACTIONS: &[Action] = &[Action {
 pub fn actions() -> Vec<Action> {
     let mut all = Vec::with_capacity(
         NATIVE_ACTIONS.len()
+            + MACRO_ACTIONS.len()
             + MOUSE_ACTIONS.len()
             + DPI_ACTIONS.len()
             + MEDIA_ACTIONS.len()
@@ -271,6 +279,7 @@ pub fn actions() -> Vec<Action> {
             + KEYBOARD.len(),
     );
     all.extend_from_slice(NATIVE_ACTIONS);
+    all.extend_from_slice(MACRO_ACTIONS);
     all.extend_from_slice(MOUSE_ACTIONS);
     all.extend_from_slice(DPI_ACTIONS);
     all.extend_from_slice(MEDIA_ACTIONS);
@@ -332,6 +341,144 @@ pub fn describe(kind: u8, value: u32) -> String {
         None if kind == KIND_MACRO => format!("macro 0x{value:06x}"),
         None => format!("type {kind}, value 0x{value:06x}"),
     }
+}
+
+/// Modifier HID usages used inside a macro chord.
+pub fn modifier_code(name: &str) -> Option<u8> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "ctrl" | "control" | "lctrl" => Some(0xe0),
+        "shift" | "lshift" => Some(0xe1),
+        "alt" | "lalt" => Some(0xe2),
+        "win" | "windows" | "super" | "meta" | "lwin" => Some(0xe3),
+        "rctrl" => Some(0xe4),
+        "rshift" => Some(0xe5),
+        "ralt" => Some(0xe6),
+        "rwin" => Some(0xe7),
+        _ => None,
+    }
+}
+
+/// HID usage for a plain key name, without a chord. The names are the same
+/// ones shown in the remap picker, plus a few friendly aliases.
+pub fn key_code(name: &str) -> Option<u8> {
+    let lower = name.trim().to_ascii_lowercase();
+    if lower.len() == 1 && lower.as_bytes()[0].is_ascii_digit() {
+        return Some(match lower.as_bytes()[0] {
+            b'1'..=b'9' => 0x1e + (lower.as_bytes()[0] - b'1'),
+            _ => 0x27,
+        });
+    }
+    let canonical = match lower.as_str() {
+        "escape" => "esc",
+        "return" => "enter",
+        "del" => "delete",
+        "ins" => "insert",
+        "pgup" | "pageup" | "page_up" => "page up",
+        "pgdn" | "pagedown" | "page_down" => "page down",
+        "spacebar" => "space",
+        "ctrl" | "control" | "lctrl" => "left ctrl",
+        "rctrl" => "right ctrl",
+        "shift" | "lshift" => "left shift",
+        "rshift" => "right shift",
+        "alt" | "lalt" => "left alt",
+        "ralt" => "right alt",
+        "win" | "windows" | "super" | "meta" | "lwin" => "left windows",
+        "rwin" => "right windows",
+        "caps" => "caps lock",
+        "printscreen" | "prtsc" => "print screen",
+        "scrolllock" => "scroll lock",
+        "numlock" => "num lock",
+        "numenter" => "num enter",
+        "numdel" => "num del",
+        "num0" => "num 0",
+        "num1" => "num 1",
+        "num2" => "num 2",
+        "num3" => "num 3",
+        "num4" => "num 4",
+        "num5" => "num 5",
+        "num6" => "num 6",
+        "num7" => "num 7",
+        "num8" => "num 8",
+        "num9" => "num 9",
+        "numplus" => "num +",
+        "numminus" => "num -",
+        "nummul" | "numstar" => "num *",
+        "numdiv" | "numslash" => "num /",
+        "minus" => "- _",
+        "comma" => ", <",
+        "period" | "dot" => ". >",
+        "slash" => "/ ?",
+        "backslash" => "\\ |",
+        "semicolon" => "; :",
+        "quote" | "apostrophe" => "' \"",
+        "lbracket" | "leftbracket" => "[ {",
+        "rbracket" | "rightbracket" => "] }",
+        "grave" | "backtick" => "` ~",
+        "equal" | "equals" => "= +",
+        "0" => "0 )",
+        "1" => "1 !",
+        "2" => "2 @",
+        "3" => "3 #",
+        "4" => "4 $",
+        "5" => "5 %",
+        "6" => "6 ^",
+        "7" => "7 &",
+        "8" => "8 *",
+        "9" => "9 (",
+        other => other,
+    };
+    KEYBOARD
+        .iter()
+        .find(|(key, _)| !key.contains(" + ") && key.eq_ignore_ascii_case(canonical))
+        .map(|(_, value)| (value >> 8) as u8)
+}
+
+/// HID usage and whether Shift is needed to type this character on a US
+/// keyboard. Used by quoted strings in the macro editor.
+pub fn char_key(c: char) -> Option<(u8, bool)> {
+    let pair = match c {
+        'a'..='z' => (0x04 + (c as u8 - b'a'), false),
+        'A'..='Z' => (0x04 + (c as u8 - b'A'), true),
+        '1'..='9' => (0x1e + (c as u8 - b'1'), false),
+        '0' => (0x27, false),
+        '!' => (0x1e, true),
+        '@' => (0x1f, true),
+        '#' => (0x20, true),
+        '$' => (0x21, true),
+        '%' => (0x22, true),
+        '^' => (0x23, true),
+        '&' => (0x24, true),
+        '*' => (0x25, true),
+        '(' => (0x26, true),
+        ')' => (0x27, true),
+        '-' => (0x2d, false),
+        '_' => (0x2d, true),
+        '=' => (0x2e, false),
+        '+' => (0x2e, true),
+        '[' => (0x2f, false),
+        '{' => (0x2f, true),
+        ']' => (0x30, false),
+        '}' => (0x30, true),
+        '\\' => (0x31, false),
+        '|' => (0x31, true),
+        ';' => (0x33, false),
+        ':' => (0x33, true),
+        '\'' => (0x34, false),
+        '"' => (0x34, true),
+        ',' => (0x36, false),
+        '<' => (0x36, true),
+        '.' => (0x37, false),
+        '>' => (0x37, true),
+        '/' => (0x38, false),
+        '?' => (0x38, true),
+        '`' => (0x35, false),
+        '~' => (0x35, true),
+        ' ' => (0x2c, false),
+        '\t' => (0x2b, false),
+        '\n' => (0x28, false),
+        _ => return None,
+    };
+    Some(pair)
 }
 
 const KEYBOARD: &[(&str, u32)] = &[
@@ -529,6 +676,42 @@ mod tests {
         assert_eq!(describe(KIND_PROFILE, 0x040000), "Cycle profiles");
         assert_eq!(describe(KIND_MACRO, 0x123456), "macro 0x123456");
         assert_eq!(describe(6, 0x42), "type 6, value 0x000042");
+    }
+
+    #[test]
+    fn macro_key_lookup_handles_names_and_chords() {
+        assert_eq!(key_code("A"), Some(0x04));
+        assert_eq!(key_code("z"), Some(0x1d));
+        assert_eq!(key_code("1"), Some(0x1e));
+        assert_eq!(key_code("0"), Some(0x27));
+        assert_eq!(key_code("F10"), Some(0x43));
+        assert_eq!(key_code("pageup"), Some(0x4b));
+        assert_eq!(key_code("return"), Some(0x28));
+        assert_eq!(key_code("numplus"), Some(0x57));
+        assert_eq!(key_code("ctrl"), Some(0xe0));
+        assert_eq!(key_code("nope"), None);
+
+        assert_eq!(modifier_code("CTRL"), Some(0xe0));
+        assert_eq!(modifier_code("super"), Some(0xe3));
+        assert_eq!(modifier_code("a"), None);
+
+        assert_eq!(char_key('a'), Some((0x04, false)));
+        assert_eq!(char_key('A'), Some((0x04, true)));
+        assert_eq!(char_key('!'), Some((0x1e, true)));
+        assert_eq!(char_key(' '), Some((0x2c, false)));
+        assert_eq!(char_key('+'), Some((0x2e, true)));
+        assert_eq!(char_key('€'), None);
+    }
+
+    #[test]
+    fn the_macro_action_is_offered() {
+        let macros: Vec<_> = actions()
+            .into_iter()
+            .filter(|a| a.kind == KIND_MACRO)
+            .collect();
+        assert_eq!(macros.len(), 1);
+        assert_eq!(macros[0].value, 0);
+        assert!(filter("macro").iter().any(|a| a.kind == KIND_MACRO));
     }
 
     #[test]

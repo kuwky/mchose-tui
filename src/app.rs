@@ -1,8 +1,9 @@
 //! Application state, key handling and the renderer.
 
 use crate::buttons;
+use crate::macros;
 use crate::mouse::{model_info, DemoMouse, ModelInfo, Mouse, RealMouse};
-use crate::proto::{self, Config, Identity, DPI_STAGES};
+use crate::proto::{self, Config, Identity, MacroEvent, BUTTON_COUNT, DPI_STAGES};
 use crate::state;
 use crate::term::Key;
 use std::io;
@@ -81,6 +82,12 @@ struct Remap {
     selected: usize,
 }
 
+struct MacroEdit {
+    slot: u8,
+    buffer: String,
+    error: Option<String>,
+}
+
 pub struct Options {
     pub demo: bool,
     pub device: Option<String>,
@@ -101,6 +108,9 @@ pub struct App {
     selected: usize,
     edit: Option<Edit>,
     remap: Option<Remap>,
+    macro_edit: Option<MacroEdit>,
+    macro_names: [Option<String>; BUTTON_COUNT],
+    macro_expr: [Option<String>; BUTTON_COUNT],
     message: Message,
     confirm_restore: bool,
     show_log: bool,
@@ -113,12 +123,16 @@ pub struct App {
     battery_stale: bool,
 }
 
-pub fn open(opts: &Options) -> Result<App, String> {
-    let mouse: Box<dyn Mouse> = if opts.demo {
-        Box::new(DemoMouse::new())
+pub fn open_mouse(opts: &Options) -> Result<Box<dyn Mouse>, String> {
+    if opts.demo {
+        Ok(Box::new(DemoMouse::new()))
     } else {
-        Box::new(RealMouse::discover(opts.device.as_deref())?)
-    };
+        Ok(Box::new(RealMouse::discover(opts.device.as_deref())?))
+    }
+}
+
+pub fn open(opts: &Options) -> Result<App, String> {
+    let mouse = open_mouse(opts)?;
     App::new(mouse, opts.demo, opts.color, opts.accent).map_err(|e| {
         format!(
             "The interface was found but the mouse did not answer.\n\n{e}\n\n\
@@ -139,6 +153,24 @@ impl App {
         let version = mouse.version().unwrap_or_default();
         let config = mouse.read_config()?;
         let game_mode = config.game_mode();
+        let mut macro_names: [Option<String>; BUTTON_COUNT] = std::array::from_fn(|_| None);
+        for (slot, name) in macro_names.iter_mut().enumerate() {
+            if config.button(slot).0 == buttons::KIND_MACRO {
+                if let Ok(read) = mouse.macro_name(slot as u8) {
+                    if !read.trim().is_empty() {
+                        *name = Some(read);
+                    }
+                }
+            }
+        }
+        let pid = identity.pid;
+        let macro_expr: [Option<String>; BUTTON_COUNT] = std::array::from_fn(|slot| {
+            if demo {
+                None
+            } else {
+                state::load_macro_expr(pid, slot as u8)
+            }
+        });
         let lod_index = if demo {
             model.default_lod
         } else if model.lod_in_sensor {
@@ -160,6 +192,9 @@ impl App {
             selected: 0,
             edit: None,
             remap: None,
+            macro_edit: None,
+            macro_names,
+            macro_expr,
             message: Message::default(),
             confirm_restore: false,
             show_log: false,
@@ -190,6 +225,13 @@ impl App {
 
     /// Returns true when the app should quit.
     pub fn handle_key(&mut self, key: Key) -> bool {
+        if self.macro_edit.is_some() {
+            if matches!(key, Key::CtrlC) {
+                return true;
+            }
+            self.handle_macro_edit(key);
+            return false;
+        }
         if self.remap.is_some() {
             if matches!(key, Key::CtrlC) {
                 return true;
@@ -298,7 +340,11 @@ impl App {
             }
             Key::Enter => {
                 if let Some(action) = matches.get(remap.selected).copied() {
-                    self.apply_button(remap.slot, action);
+                    if action.kind == buttons::KIND_MACRO {
+                        self.open_macro_editor(remap.slot);
+                    } else {
+                        self.apply_button(remap.slot, action);
+                    }
                 } else {
                     self.remap = Some(remap);
                     self.info("No action selected.");
@@ -332,6 +378,197 @@ impl App {
             _ => {}
         }
         self.remap = Some(remap);
+    }
+
+    fn handle_macro_edit(&mut self, key: Key) {
+        let Some(mut edit) = self.macro_edit.take() else {
+            return;
+        };
+        match key {
+            Key::Enter => match macros::parse(&edit.buffer) {
+                Ok(events) => {
+                    let expression = edit.buffer.trim().to_string();
+                    self.apply_macro(edit.slot, &events, &expression);
+                }
+                Err(e) => {
+                    edit.error = Some(e);
+                    self.macro_edit = Some(edit);
+                }
+            },
+            Key::Esc => self.info("Macro cancelled."),
+            Key::Backspace => {
+                edit.buffer.pop();
+                edit.error = None;
+                self.macro_edit = Some(edit);
+            }
+            Key::Space | Key::Tab => {
+                edit.buffer.push(' ');
+                edit.error = None;
+                self.macro_edit = Some(edit);
+            }
+            Key::Char(c) if !c.is_control() => {
+                if edit.buffer.len() < 400 {
+                    edit.buffer.push(c);
+                }
+                edit.error = None;
+                self.macro_edit = Some(edit);
+            }
+            _ => self.macro_edit = Some(edit),
+        }
+    }
+
+    fn open_macro_editor(&mut self, slot: u8) {
+        let Some(info) = buttons::button_info(slot) else {
+            return;
+        };
+        self.remap = None;
+        let buffer = self.macro_expr[slot as usize].clone().unwrap_or_default();
+        self.macro_edit = Some(MacroEdit {
+            slot,
+            buffer,
+            error: None,
+        });
+        let existing = self.macro_names[slot as usize].as_deref().unwrap_or("none");
+        self.info(format!(
+            "Macro for the {} button. On the mouse: {existing}. Enter saves, Esc cancels.",
+            info.name
+        ));
+    }
+
+    fn apply_macro(&mut self, slot: u8, events: &[MacroEvent], expression: &str) {
+        self.macro_edit = None;
+        let Some(info) = buttons::button_info(slot).copied() else {
+            return;
+        };
+        let before = match self.mouse.read_config() {
+            Ok(c) => c,
+            Err(e) => {
+                self.macro_failed(slot, expression, format!("Could not read the mouse: {e}"));
+                return;
+            }
+        };
+        let mut wanted = before.clone();
+        wanted.set_button(slot as usize, buttons::KIND_MACRO, 0);
+        if left_click_count(&wanted) == 0 {
+            self.macro_failed(
+                slot,
+                expression,
+                "Refusing to remove the last left click. Map another button to \
+                 Left click first."
+                    .into(),
+            );
+            return;
+        }
+        if let Err(e) = self.backup_once(&before) {
+            self.macro_failed(
+                slot,
+                expression,
+                format!("Could not save the original config: {e}"),
+            );
+            return;
+        }
+
+        let name = macros::name_for(expression);
+        if let Err(e) = self.mouse.write_macro(info.wire, events, &name) {
+            self.macro_failed(
+                slot,
+                expression,
+                format!("{} macro: write failed ({e})", info.name),
+            );
+            return;
+        }
+
+        // Writing the macro usually binds the button on the firmware side. Only
+        // send the explicit button command if the config still says otherwise;
+        // this keeps the vendor's automatic path untouched.
+        sleep(Duration::from_millis(120));
+        let already_bound = self
+            .mouse
+            .read_config()
+            .map(|config| config.button(slot as usize).0 == buttons::KIND_MACRO)
+            .unwrap_or(false);
+        if !already_bound {
+            if let Err(e) = self.mouse.set_button(info.wire, buttons::KIND_MACRO, 0) {
+                self.macro_failed(
+                    slot,
+                    expression,
+                    format!("{} macro: binding failed ({e})", info.name),
+                );
+                return;
+            }
+        }
+
+        for _ in 0..20 {
+            sleep(Duration::from_millis(150));
+            if let Ok(config) = self.mouse.read_config() {
+                self.config = config;
+                if self.config.button(slot as usize).0 == buttons::KIND_MACRO {
+                    self.macro_expr[slot as usize] = Some(expression.to_string());
+                    if !self.demo {
+                        let _ = state::save_macro_expr(self.identity.pid, slot, expression);
+                    }
+                    self.macro_names[slot as usize] = Some(name.clone());
+                    self.refresh_macro_names();
+                    self.ok(format!(
+                        "{} button: macro \"{}\" ({}).",
+                        info.name,
+                        name,
+                        macros::summary(events)
+                    ));
+                    return;
+                }
+            }
+        }
+
+        self.reload();
+        if self.config.button(slot as usize).0 == buttons::KIND_MACRO {
+            self.macro_expr[slot as usize] = Some(expression.to_string());
+            if !self.demo {
+                let _ = state::save_macro_expr(self.identity.pid, slot, expression);
+            }
+            self.macro_names[slot as usize] = Some(name.clone());
+            self.ok(format!(
+                "{} button: macro \"{}\" ({}).",
+                info.name,
+                name,
+                macros::summary(events)
+            ));
+        } else {
+            let (kind, value) = self.config.button(slot as usize);
+            self.macro_failed(
+                slot,
+                expression,
+                format!(
+                    "The mouse kept {} for the {} button.",
+                    buttons::describe(kind, value),
+                    info.name
+                ),
+            );
+        }
+    }
+
+    fn macro_failed(&mut self, slot: u8, expression: &str, error: String) {
+        self.err(error.clone());
+        self.macro_edit = Some(MacroEdit {
+            slot,
+            buffer: expression.to_string(),
+            error: Some(error),
+        });
+        self.reload();
+    }
+
+    fn refresh_macro_names(&mut self) {
+        for (slot, name) in self.macro_names.iter_mut().enumerate() {
+            if self.config.button(slot).0 == buttons::KIND_MACRO {
+                if let Ok(read) = self.mouse.macro_name(slot as u8) {
+                    if !read.trim().is_empty() {
+                        *name = Some(read);
+                    }
+                }
+            } else {
+                *name = None;
+            }
+        }
     }
 
     fn open_remap(&mut self, slot: u8) {
@@ -639,6 +876,7 @@ impl App {
             self.game_mode = config.game_mode();
             self.config = config;
             self.sync_lod_from_config();
+            self.refresh_macro_names();
         }
     }
 
@@ -1232,11 +1470,19 @@ impl App {
 
         for info in buttons::BUTTONS {
             let (kind, value) = self.config.button(info.slot as usize);
+            let value = if kind == buttons::KIND_MACRO {
+                match self.macro_names[info.slot as usize].as_deref() {
+                    Some(name) => format!("Macro · {name}"),
+                    None => "Macro".to_string(),
+                }
+            } else {
+                buttons::describe(kind, value)
+            };
             items.push(Item {
                 group: "BUTTONS",
                 row: Some(Row::Button(info.slot)),
                 label: format!("{} button", info.name),
-                value: buttons::describe(kind, value),
+                value,
             });
         }
 
@@ -1355,6 +1601,86 @@ impl App {
             }
         }
         (lines, selected_line)
+    }
+
+    fn macro_view(&self, edit: &MacroEdit, width: usize, height: usize) -> Vec<String> {
+        let mut lines = Vec::new();
+        if height == 0 {
+            return lines;
+        }
+        let name = buttons::button_info(edit.slot)
+            .map(|b| b.name)
+            .unwrap_or("?");
+        lines.push(style(
+            &fit(
+                &format!(" MACRO · {} BUTTON", name.to_ascii_uppercase()),
+                width,
+            ),
+            &self.accent_code(),
+            self.color,
+        ));
+        if lines.len() < height {
+            lines.push(style(&"─".repeat(width), "\x1b[2m", self.color));
+        }
+
+        let sequence = if edit.buffer.is_empty() {
+            "Sequence: _".to_string()
+        } else {
+            format!("Sequence: {}_", edit.buffer)
+        };
+        for chunk in wrap(&sequence, width.saturating_sub(2)) {
+            if lines.len() >= height {
+                break;
+            }
+            lines.push(fit(&format!(" {chunk}"), width));
+        }
+
+        let (status, code) = match macros::parse(&edit.buffer) {
+            Ok(events) => (macros::summary(&events), "\x1b[32m"),
+            Err(error) => (error, "\x1b[31m"),
+        };
+        if lines.len() < height {
+            lines.push(style(&fit(&format!(" {status}"), width), code, self.color));
+        }
+        if let Some(error) = &edit.error {
+            if macros::parse(&edit.buffer).is_ok() && lines.len() < height {
+                lines.push(style(
+                    &fit(&format!(" {error}"), width),
+                    "\x1b[31m",
+                    self.color,
+                ));
+            }
+        }
+        if let Some(existing) = self.macro_names[edit.slot as usize].as_deref() {
+            if lines.len() < height {
+                lines.push(style(
+                    &fit(&format!(" Existing on mouse: {existing}"), width),
+                    "\x1b[2m",
+                    self.color,
+                ));
+            }
+        }
+        if lines.len() < height {
+            lines.push(fit("", width));
+        }
+        for help in [
+            " Syntax:",
+            "   ctrl+c   shift+f10   alt+tab   enter   f5",
+            "   delay:50   mouse:left   mouse:right   wheel:up",
+            "   \"Hello\" types text; spaces separate steps",
+            "   + joins modifiers; 13 events (52 bytes) max",
+            "   A key is one down + one up; a chord is four events.",
+        ] {
+            if lines.len() >= height {
+                break;
+            }
+            lines.push(style(&fit(help, width), "\x1b[2m", self.color));
+        }
+        while lines.len() < height {
+            lines.push(fit("", width));
+        }
+        lines.truncate(height);
+        lines
     }
 
     fn remap_view(&self, remap: &Remap, width: usize, height: usize) -> Vec<String> {
@@ -1494,14 +1820,20 @@ impl App {
         let label_w = if w >= 80 { 26 } else { 18 };
 
         let available = h.saturating_sub(5);
-        let log_total = if self.show_log && self.remap.is_none() && !self.show_config {
+        let log_total = if self.show_log
+            && self.remap.is_none()
+            && self.macro_edit.is_none()
+            && !self.show_config
+        {
             (available.saturating_sub(3)).min((h / 4).clamp(2, 7) + 1)
         } else {
             0
         };
         let main_h = available.saturating_sub(log_total).max(1);
 
-        let main_lines = if let Some(remap) = &self.remap {
+        let main_lines = if let Some(edit) = &self.macro_edit {
+            self.macro_view(edit, w, main_h)
+        } else if let Some(remap) = &self.remap {
             self.remap_view(remap, w, main_h)
         } else if self.show_config {
             self.config_view(w, main_h)
@@ -1577,7 +1909,23 @@ impl App {
         }
 
         lines.push(style(&"─".repeat(w), "\x1b[2m", self.color));
-        let (status, code) = if let Some(remap) = &self.remap {
+        let (status, code) = if let Some(edit) = &self.macro_edit {
+            let name = buttons::button_info(edit.slot)
+                .map(|b| b.name)
+                .unwrap_or("?");
+            let (detail, code) = if let Some(error) = &edit.error {
+                (error.clone(), "\x1b[31m")
+            } else {
+                match macros::parse(&edit.buffer) {
+                    Ok(events) => (macros::summary(&events), "\x1b[33m"),
+                    Err(error) => (error, "\x1b[31m"),
+                }
+            };
+            (
+                format!(" Macro for {name}: {detail}   (Enter save, Esc cancel)"),
+                code,
+            )
+        } else if let Some(remap) = &self.remap {
             let name = buttons::button_info(remap.slot)
                 .map(|b| b.name)
                 .unwrap_or("?");
@@ -1626,7 +1974,9 @@ impl App {
             )
         };
         lines.push(style(&fit(&status, w), code, self.color));
-        let keys = if self.remap.is_some() {
+        let keys = if self.macro_edit.is_some() {
+            " Type a sequence  Backspace delete  Enter save  Esc cancel"
+        } else if self.remap.is_some() {
             " Type to filter  Up/Down move  PgUp/PgDn jump  Enter apply  Esc cancel"
         } else if self.show_config {
             " d or Esc back  r refresh  q quit"
@@ -1935,6 +2285,95 @@ mod tests {
 
         app.apply_rotation(0);
         assert_eq!(app.config.rotate(), 0);
+    }
+
+    #[test]
+    fn demo_macro_editor_writes_and_binds_a_macro() {
+        let mut app = demo_app(None);
+        app.open_macro_editor(1);
+        assert!(app.macro_edit.is_some());
+
+        let edit = app.macro_edit.as_mut().unwrap();
+        edit.buffer = "ctrl+c".into();
+        app.handle_key(Key::Enter);
+
+        assert!(app.macro_edit.is_none());
+        assert_eq!(app.config.button(1).0, buttons::KIND_MACRO);
+        assert_eq!(app.config.button(1).1, 0);
+        assert_eq!(app.macro_names[1].as_deref(), Some("TUI ctrl+c"));
+        assert_eq!(app.macro_expr[1].as_deref(), Some("ctrl+c"));
+
+        let screen = app.render(100, 40);
+        assert!(screen.contains("Macro · TUI ctrl+c"));
+    }
+
+    #[test]
+    fn the_remap_picker_opens_the_macro_editor() {
+        let mut app = demo_app(None);
+        app.open_remap(1);
+        for ch in "macro".chars() {
+            app.handle_key(Key::Char(ch));
+        }
+        assert!(app
+            .remap
+            .as_ref()
+            .is_some_and(|remap| buttons::filter(&remap.query)
+                .iter()
+                .any(|action| action.kind == buttons::KIND_MACRO)));
+        app.handle_key(Key::Enter);
+        assert!(app.remap.is_none());
+        assert!(app.macro_edit.is_some());
+    }
+
+    #[test]
+    fn a_macro_cannot_remove_the_last_left_click() {
+        let mut app = demo_app(None);
+        app.open_macro_editor(0);
+        app.macro_edit.as_mut().unwrap().buffer = "a".into();
+        app.handle_key(Key::Enter);
+
+        // The editor stays open with an explanation, and the mapping is intact.
+        assert!(app.macro_edit.is_some());
+        assert_eq!(app.config.button(0), (buttons::KIND_NATIVE, 0));
+        assert!(app
+            .macro_edit
+            .as_ref()
+            .unwrap()
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("last left click"));
+    }
+
+    #[test]
+    fn a_bad_macro_keeps_the_editor_open() {
+        let mut app = demo_app(None);
+        app.open_macro_editor(1);
+        app.macro_edit.as_mut().unwrap().buffer = "nope".into();
+        app.handle_key(Key::Enter);
+
+        assert!(app.macro_edit.is_some());
+        assert_eq!(app.config.button(1), (buttons::KIND_NATIVE, 0));
+        assert!(app
+            .macro_edit
+            .as_ref()
+            .unwrap()
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("Unknown key"));
+    }
+
+    #[test]
+    fn the_macro_editor_shows_syntax_and_a_live_count() {
+        let mut app = demo_app(None);
+        app.open_macro_editor(1);
+        app.macro_edit.as_mut().unwrap().buffer = "ctrl+c".into();
+        let screen = app.render(100, 40);
+        assert!(screen.contains("MACRO · MIDDLE BUTTON"));
+        assert!(screen.contains("4 events · 16/52 bytes"));
+        assert!(screen.contains("Syntax:"));
+        assert!(screen.contains("delay:50"));
     }
 
     #[test]

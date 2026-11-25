@@ -2,7 +2,7 @@
 
 use crate::buttons;
 use crate::hid::{self, HidRaw, Node};
-use crate::proto::{self, Config, Identity};
+use crate::proto::{self, Config, Identity, MacroEvent};
 use std::io;
 use std::path::PathBuf;
 
@@ -62,6 +62,8 @@ pub trait Mouse {
     ) -> io::Result<()>;
     fn set_profile(&mut self, profile: u8) -> io::Result<()>;
     fn set_game_mode(&mut self, mode: u8) -> io::Result<()>;
+    fn write_macro(&mut self, wire: u8, events: &[MacroEvent], name: &str) -> io::Result<()>;
+    fn macro_name(&mut self, wire: u8) -> io::Result<String>;
 }
 
 pub struct RealMouse {
@@ -184,6 +186,14 @@ impl Mouse for RealMouse {
     fn set_game_mode(&mut self, mode: u8) -> io::Result<()> {
         proto::set_game_mode(&self.dev, mode)
     }
+
+    fn write_macro(&mut self, wire: u8, events: &[MacroEvent], name: &str) -> io::Result<()> {
+        proto::write_macro(&self.dev, wire, events, name)
+    }
+
+    fn macro_name(&mut self, wire: u8) -> io::Result<String> {
+        proto::read_macro_name(&self.dev, wire)
+    }
 }
 
 fn discovery_error(all: &[Node], failures: &[(Node, String)]) -> String {
@@ -252,6 +262,7 @@ fn discovery_error(all: &[Node], failures: &[(Node, String)]) -> String {
 
 pub struct DemoMouse {
     cfg: Config,
+    macros: [Option<(String, Vec<MacroEvent>)>; proto::BUTTON_COUNT],
 }
 
 impl DemoMouse {
@@ -272,7 +283,10 @@ impl DemoMouse {
         for slot in 0..proto::BUTTON_COUNT {
             cfg.set_button(slot, buttons::KIND_NATIVE, 0);
         }
-        Self { cfg }
+        Self {
+            cfg,
+            macros: std::array::from_fn(|_| None),
+        }
     }
 }
 
@@ -363,6 +377,32 @@ impl Mouse for DemoMouse {
         }
         self.cfg.set_game_mode(mode);
         Ok(())
+    }
+
+    fn write_macro(&mut self, wire: u8, events: &[MacroEvent], name: &str) -> io::Result<()> {
+        let slot = buttons::slot_for_wire(wire).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("macro button {wire} out of range"),
+            )
+        })?;
+        proto::macro_body(wire, events)?;
+        self.macros[slot as usize] = Some((name.to_string(), events.to_vec()));
+        self.cfg.set_button(slot as usize, buttons::KIND_MACRO, 0);
+        Ok(())
+    }
+
+    fn macro_name(&mut self, wire: u8) -> io::Result<String> {
+        let slot = buttons::slot_for_wire(wire).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("macro button {wire} out of range"),
+            )
+        })?;
+        self.macros[slot as usize]
+            .as_ref()
+            .map(|(name, _)| name.clone())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "the button has no macro"))
     }
 }
 

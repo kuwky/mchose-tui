@@ -19,6 +19,8 @@ pub const BUTTON_SIZE: usize = 4;
 /// Entries in the config block. The firmware exposes only the first five for
 /// remapping; the sixth is reserved and the DPI button is fixed.
 pub const BUTTON_COUNT: usize = 6;
+/// A short macro packet carries at most 52 event bytes, four per event.
+pub const MACRO_MAX_EVENTS: usize = 13;
 
 const MIN_GAP: Duration = Duration::from_millis(25);
 
@@ -568,6 +570,138 @@ pub fn set_button(dev: &HidRaw, wire: u8, kind: u8, value: u32) -> io::Result<()
     )
 }
 
+/// One four-byte event in a macro. The vendor encodes key presses as a HID
+/// usage, delays in milliseconds, mouse buttons by their report bits, and the
+/// wheel as a signed step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MacroEvent {
+    Key { code: u8, down: bool },
+    Delay(u16),
+    Mouse { button: u8, down: bool },
+    Wheel { up: bool },
+}
+
+impl MacroEvent {
+    pub fn encode(self) -> [u8; 4] {
+        match self {
+            Self::Key { code, down } => [0, if down { 0x81 } else { 0x01 }, 0, code],
+            Self::Delay(ms) => {
+                let [lo, hi] = ms.to_le_bytes();
+                [0, 0x0f, lo, hi]
+            }
+            Self::Mouse { button, down } => [0, if down { 0x88 } else { 0x08 }, button, 0],
+            Self::Wheel { up } => [0, 0x05, if up { 1 } else { 0xff }, 0],
+        }
+    }
+
+    #[cfg(test)]
+    fn decode(bytes: &[u8]) -> io::Result<Self> {
+        if bytes.len() < 4 || bytes[0] != 0 {
+            return Err(invalid("bad macro event"));
+        }
+        match bytes[1] {
+            0x81 if bytes[2] == 0 => Ok(Self::Key {
+                code: bytes[3],
+                down: true,
+            }),
+            0x01 if bytes[2] == 0 => Ok(Self::Key {
+                code: bytes[3],
+                down: false,
+            }),
+            0x0f => Ok(Self::Delay(u16::from_le_bytes([bytes[2], bytes[3]]))),
+            0x88 => Ok(Self::Mouse {
+                button: bytes[2],
+                down: true,
+            }),
+            0x08 => Ok(Self::Mouse {
+                button: bytes[2],
+                down: false,
+            }),
+            0x05 if bytes[2] == 1 && bytes[3] == 0 => Ok(Self::Wheel { up: true }),
+            0x05 if bytes[2] == 0xff && bytes[3] == 0 => Ok(Self::Wheel { up: false }),
+            other => Err(invalid(format!("unknown macro event 0x{other:02x}"))),
+        }
+    }
+}
+
+/// Build the `0x12 0x55` payload for a one-shot macro that fits in a single
+/// report. The vendor always sends `length = 58` and `condition = 1`
+/// (`cycleRepetition`, "execute once").
+pub fn macro_body(button: u8, events: &[MacroEvent]) -> io::Result<Vec<u8>> {
+    if button as usize >= BUTTON_COUNT {
+        return Err(invalid(format!("macro button {button} out of range")));
+    }
+    if events.is_empty() {
+        return Err(invalid("a macro needs at least one event"));
+    }
+    if events.len() > MACRO_MAX_EVENTS {
+        return Err(invalid(format!(
+            "macro has {} events; a short macro holds {MACRO_MAX_EVENTS}",
+            events.len()
+        )));
+    }
+    let mut body = Vec::with_capacity(12 + events.len() * 4);
+    body.extend_from_slice(&[
+        0x55,
+        button,
+        0, // moreData: this is the whole macro
+        0,
+        0,  // offset
+        58, // vendor's fixed length field
+        1,  // trigger
+        1,
+        0, // condition: execute once
+        0,
+        0, // time
+        events.len() as u8,
+    ]);
+    for event in events {
+        body.extend_from_slice(&event.encode());
+    }
+    Ok(body)
+}
+
+fn truncate_name(name: &str, max: usize) -> &str {
+    if name.len() <= max {
+        return name;
+    }
+    let mut end = max;
+    while end > 0 && !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    &name[..end]
+}
+
+/// Write a short macro body (`0x12 0x55`) followed by its display name
+/// (`0x12 0x53`). Binding the button is a separate `0x12 0x52` write.
+pub fn write_macro(dev: &HidRaw, button: u8, events: &[MacroEvent], name: &str) -> io::Result<()> {
+    let body = macro_body(button, events)?;
+    send(dev, REPORT_LONG, &body)?;
+    sleep(Duration::from_millis(30));
+
+    let name = truncate_name(name.trim(), 48);
+    let mut frame = Vec::with_capacity(3 + name.len());
+    frame.push(0x53);
+    frame.push(button);
+    frame.push(name.len() as u8);
+    frame.extend_from_slice(name.as_bytes());
+    send(dev, REPORT_LONG, &frame)
+}
+
+/// Read the macro name stored for a button (`0x12 0x63`). The reply is
+/// `buttonIndex, nameSize, name`.
+pub fn read_macro_name(dev: &HidRaw, button: u8) -> io::Result<String> {
+    let d = request(dev, REPORT_LONG, &[0x63, button])?;
+    if d.len() < 2 {
+        return Err(invalid("short macro name reply"));
+    }
+    let n = (d[1] as usize).min(d.len() - 2);
+    Ok(String::from_utf8_lossy(&d[2..2 + n])
+        .trim_end_matches('\0')
+        .trim()
+        .to_string())
+}
+
 /// Poll until the written block reads back, allowing for the bytes the mouse
 /// owns itself. A config write needs time to commit.
 pub fn confirm(dev: &HidRaw, wrote: &Config) -> io::Result<Config> {
@@ -667,6 +801,84 @@ mod tests {
         assert_eq!(s & 0xE0, 0x80);
         assert_eq!(s & 0x03, 2);
         assert_eq!(s & 0x1C, 0x1C);
+    }
+
+    #[test]
+    fn macro_events_encode_the_vendor_layout() {
+        assert_eq!(
+            MacroEvent::Key {
+                code: 0x06,
+                down: true
+            }
+            .encode(),
+            [0, 0x81, 0, 0x06]
+        );
+        assert_eq!(
+            MacroEvent::Key {
+                code: 0x06,
+                down: false
+            }
+            .encode(),
+            [0, 0x01, 0, 0x06]
+        );
+        assert_eq!(MacroEvent::Delay(50).encode(), [0, 0x0f, 50, 0]);
+        assert_eq!(
+            MacroEvent::Mouse {
+                button: 1,
+                down: true
+            }
+            .encode(),
+            [0, 0x88, 1, 0]
+        );
+        assert_eq!(
+            MacroEvent::Mouse {
+                button: 1,
+                down: false
+            }
+            .encode(),
+            [0, 0x08, 1, 0]
+        );
+        assert_eq!(MacroEvent::Wheel { up: true }.encode(), [0, 0x05, 1, 0]);
+        assert_eq!(MacroEvent::Wheel { up: false }.encode(), [0, 0x05, 0xff, 0]);
+
+        for event in [
+            MacroEvent::Key {
+                code: 0xe0,
+                down: true,
+            },
+            MacroEvent::Delay(1234),
+            MacroEvent::Mouse {
+                button: 8,
+                down: false,
+            },
+            MacroEvent::Wheel { up: false },
+        ] {
+            assert_eq!(MacroEvent::decode(&event.encode()).unwrap(), event);
+        }
+        assert!(MacroEvent::decode(&[0, 0x42, 0, 0]).is_err());
+    }
+
+    #[test]
+    fn macro_body_is_a_single_short_packet() {
+        let events = [
+            MacroEvent::Key {
+                code: 0x06,
+                down: true,
+            },
+            MacroEvent::Key {
+                code: 0x06,
+                down: false,
+            },
+        ];
+        let body = macro_body(1, &events).unwrap();
+        assert_eq!(body.len(), 12 + 8);
+        assert_eq!(&body[..12], &[0x55, 1, 0, 0, 0, 58, 1, 1, 0, 0, 0, 2]);
+        assert_eq!(&body[12..], &[0, 0x81, 0, 0x06, 0, 0x01, 0, 0x06]);
+
+        let too_many = vec![MacroEvent::Delay(1); MACRO_MAX_EVENTS + 1];
+        assert!(macro_body(1, &too_many).is_err());
+        assert!(macro_body(1, &[]).is_err());
+        assert!(macro_body(BUTTON_COUNT as u8, &events).is_err());
     }
 
     #[test]

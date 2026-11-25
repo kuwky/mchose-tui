@@ -3,10 +3,11 @@
 A tiny, dependency-free terminal UI for configuring **MCHOSE** gaming mice on Linux.
 
 DPI stages, polling rate, lift-off distance, sensor rotation, debounce, sleep,
-motion sync, ripple control, angle snap, button remapping, profiles, game mode,
-battery and charging — all from one keyboard-driven screen. Plus a raw config
-hex/diff view and a UI accent that follows the mouse's DPI flash palette. No vendor
-driver, no browser, no daemon.
+motion sync, ripple control, angle snap, button remapping, keyboard/mouse
+macros, profiles, game mode, battery and charging — all from one
+keyboard-driven screen. Plus config export/import, a raw config hex/diff view,
+and a UI accent that follows the mouse's DPI flash palette. No vendor driver,
+no browser, no daemon.
 
 ```
  MCHOSE TUI 0.1.0  ·  MCHOSE L7 Ultra (demo)                               2.4 GHz  ·  87% charging
@@ -85,6 +86,13 @@ driver, no browser, no daemon.
   buttons, DPI switches, media keys, system actions, profiles, disable, and 142
   keyboard keys and shortcuts. The picker filters as you type. The DPI button
   is fixed by the firmware — M HUB does not expose it either.
+- **Macros**: bind a button to a short keyboard/mouse sequence such as
+  `ctrl+c`, `alt+tab`, or `"Hello"`. The macro editor understands modifiers,
+  function keys, delays, mouse clicks and the wheel. Macros are written with
+  the vendor's `0x12 0x55` / `0x12 0x53` commands and bound as button type 4.
+- **Config export/import**: `--export FILE` saves the 63-byte config block and
+  `--import FILE` writes it back, with the same validation and read-back as the
+  interactive writes.
 - **Profiles** 1–3 and **game mode** 1–3. The game mode is stored in the
   high bits of the sensor byte, so it is read back from the config block and
   changed with the same command as the other sensor settings. Changing a
@@ -164,7 +172,15 @@ mchose-tui --list           # show MCHOSE hidraw nodes and permissions
 mchose-tui --device /dev/hidraw7
 mchose-tui --no-color
 mchose-tui --accent '#FF8800'
+mchose-tui --export mouse-config.bin
+mchose-tui --import mouse-config.bin
 ```
+
+`--export` writes exactly the 63-byte config block, so it can be diffed with
+`cmp`/`xxd` or restored later. `--import` refuses files of any other size and
+refuses an all-zero block. The current config is backed up before the import,
+then the file is written and read back like every other change. Both options
+work with `--demo` and `--device`.
 
 ### Keys
 
@@ -224,12 +240,45 @@ left click elsewhere, first map another button to **Left click**, then change
 the original one. The config backup made before the first write can always be
 restored from **Tools → Restore original**.
 
+### Macros
+
+Choose **Create / edit macro…** in the remap picker. The macro editor takes a
+short text sequence:
+
+| Syntax | Meaning |
+| --- | --- |
+| `a`, `f5`, `enter`, `pageup` | press and release one key |
+| `ctrl+c`, `shift+f10`, `alt+tab` | hold modifiers, press the key, release |
+| `delay:50` | wait 50 ms (0–65535) |
+| `mouse:left`, `mouse:right`, `mouse:middle`, `mouse:forward`, `mouse:back` | click a mouse button |
+| `wheel:up`, `wheel:down` | one wheel step |
+| `"Hello"` | type the characters in quotes (US layout) |
+
+Steps are separated by spaces. Modifiers are `ctrl`, `shift`, `alt`, and
+`win` (also `super`/`meta`); `+` joins them to the key. A few names have
+aliases: `return` = `enter`, `del` = `delete`, `pgup`/`pgdn`, `minus`,
+`equal`, `comma`, `period`, `slash`, `backslash`, `semicolon`, `quote`,
+`lbracket`, `rbracket`, `grave`, `numplus`, `numminus`, `nummul`, `numdiv`.
+
+A key press costs two events (down + up) and a chord costs four. The firmware
+stores a short macro in one packet, so the limit is **13 events / 52 bytes**.
+The editor counts events live and refuses to write a longer sequence. The
+mouse keeps the macro body; this tool remembers the expression you typed in
+`~/.local/state/mchose-tui/` so reopening the editor starts from it. Macros
+created by M HUB can be rebound or overwritten here, but their original
+expression is not recoverable.
+
 ## Safety
 
 - Every write is a read-modify-write of the full 63-byte config block, then
   polled back until the mouse confirms it. Button remaps use the dedicated
-  `0x12 0x52` command and are read back from the same config block.
-- The remap picker refuses to leave the mouse without a left click.
+  `0x12 0x52` command and are read back from the same config block. Macro
+  bodies use `0x12 0x55` and `0x12 0x53`; the binding is checked in the config
+  block after the write.
+- The remap picker and the macro editor refuse to leave the mouse without a
+  left click.
+- `--import` only accepts a 63-byte, non-zero block, backs up the current
+  config first, and reads the result back.
 - The first write of any kind saves the untouched config to
   `~/.local/state/mchose-tui/config.original.bin` (never overwritten).
 - **Restore original** in the Tools group writes that file back; it asks for a

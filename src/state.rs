@@ -25,6 +25,10 @@ fn lod_path(pid: u16) -> PathBuf {
     base().join(format!("lod-{pid:04x}.txt"))
 }
 
+fn macro_expr_path(pid: u16, slot: u8) -> PathBuf {
+    base().join(format!("macro-{pid:04x}-{slot}.txt"))
+}
+
 /// Save the config as it was before this tool ever wrote to it. Never
 /// overwrites an existing copy.
 pub fn backup_once(c: &Config) -> io::Result<()> {
@@ -77,4 +81,25 @@ pub fn save_lod(pid: u16, index: u8) {
         let _ = fs::create_dir_all(dir);
     }
     let _ = fs::write(path, index.to_string());
+}
+
+/// Remember the expression this tool wrote, so editing a macro can start from
+/// what the user typed instead of an empty line. The device still holds the
+/// real macro; this is only an editor convenience.
+pub fn load_macro_expr(pid: u16, slot: u8) -> Option<String> {
+    let text = fs::read_to_string(macro_expr_path(pid, slot)).ok()?;
+    let text = text.trim_end_matches('\n').trim_end_matches('\r');
+    if text.is_empty() {
+        None
+    } else {
+        Some(text.to_string())
+    }
+}
+
+pub fn save_macro_expr(pid: u16, slot: u8, expression: &str) -> io::Result<()> {
+    let path = macro_expr_path(pid, slot);
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    fs::write(path, expression)
 }

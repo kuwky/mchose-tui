@@ -1,6 +1,7 @@
 mod app;
 mod buttons;
 mod hid;
+mod macros;
 mod mouse;
 mod proto;
 mod state;
@@ -15,6 +16,8 @@ mchose-tui - configure MCHOSE gaming mice from a terminal
 
 Usage:
   mchose-tui [--demo] [--device /dev/hidrawN] [--no-color] [--accent #RRGGBB]
+  mchose-tui --export FILE [--device /dev/hidrawN]
+  mchose-tui --import FILE [--device /dev/hidrawN]
   mchose-tui --list
   mchose-tui --help
 
@@ -23,6 +26,8 @@ Options:
   --device <path>     use this hidraw node instead of autodetection
   --no-color          disable ANSI colours
   --accent #RRGGBB    TUI accent colour (default: follow the DPI flash colour)
+  --export FILE       write the 63-byte config block to FILE and exit
+  --import FILE       restore a 63-byte config block from FILE and exit
   --list              list MCHOSE hidraw nodes and exit
   -h, --help          show this help
   -V, --version       show the version
@@ -34,7 +39,12 @@ Keys:
   f                   frame log     q                   quit
 
 Press Enter on a button row to remap it. In the picker, type to filter,
-Up/Down to choose, Enter to apply, Esc to cancel.
+Up/Down to choose, Enter to apply, Esc to cancel. Choose 'Create / edit
+macro…' to open the macro editor.
+
+Macro syntax: ctrl+c, shift+f10, alt+tab, enter, f5, delay:50,
+mouse:left, mouse:right, wheel:up, and 'text' in quotes to type a string.
+A short macro holds 13 events (52 bytes); one key is two events, a chord four.
 
 The bottom LED briefly flashes the DPI-stage palette after a stage change,
 then returns to a steady status/charge colour. The firmware ignores lighting
@@ -65,6 +75,8 @@ fn run() -> Result<(), String> {
         accent: None,
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut export = None;
+    let mut import = None;
     let mut i = 0;
     while i < args.len() {
         let arg = &args[i];
@@ -80,6 +92,28 @@ fn run() -> Result<(), String> {
             }
             s if s.starts_with("--device=") => {
                 opts.device = Some(s["--device=".len()..].to_string());
+            }
+            "--export" => {
+                i += 1;
+                export = Some(
+                    args.get(i)
+                        .ok_or_else(|| "--export needs a file".to_string())?
+                        .clone(),
+                );
+            }
+            s if s.starts_with("--export=") => {
+                export = Some(s["--export=".len()..].to_string());
+            }
+            "--import" => {
+                i += 1;
+                import = Some(
+                    args.get(i)
+                        .ok_or_else(|| "--import needs a file".to_string())?
+                        .clone(),
+                );
+            }
+            s if s.starts_with("--import=") => {
+                import = Some(s["--import=".len()..].to_string());
             }
             "--accent" => {
                 i += 1;
@@ -114,7 +148,64 @@ fn run() -> Result<(), String> {
         }
         i += 1;
     }
+    if export.is_some() && import.is_some() {
+        return Err("--export and --import cannot be used together".into());
+    }
+    if let Some(path) = export {
+        return export_config(&opts, &path);
+    }
+    if let Some(path) = import {
+        return import_config(&opts, &path);
+    }
     run_tui(opts)
+}
+
+fn export_config(opts: &Options, path: &str) -> Result<(), String> {
+    let mut mouse = app::open_mouse(opts)?;
+    let config = mouse
+        .read_config()
+        .map_err(|e| format!("cannot read the config: {e}"))?;
+    std::fs::write(path, config.body).map_err(|e| format!("cannot write {path}: {e}"))?;
+    println!("Exported the 63-byte config block to {path}.");
+    Ok(())
+}
+
+fn import_config(opts: &Options, path: &str) -> Result<(), String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("cannot read {path}: {e}"))?;
+    if bytes.len() != 63 {
+        return Err(format!(
+            "{path} is {} bytes; a config block must be exactly 63 bytes",
+            bytes.len()
+        ));
+    }
+    if bytes.iter().all(|b| *b == 0) {
+        return Err(format!("{path} is all zeroes; refusing to import it"));
+    }
+    let mut body = [0u8; 63];
+    body.copy_from_slice(&bytes);
+    let wanted = proto::Config { body };
+
+    let mut mouse = app::open_mouse(opts)?;
+    let current = mouse
+        .read_config()
+        .map_err(|e| format!("cannot read the current config: {e}"))?;
+    if !opts.demo {
+        state::backup_once(&current)
+            .map_err(|e| format!("cannot save the original config: {e}"))?;
+    }
+    let diff = current.diff(&wanted);
+    mouse
+        .write_config(&wanted)
+        .map_err(|e| format!("cannot write the config: {e}"))?;
+    mouse
+        .confirm_config(&wanted)
+        .map_err(|e| format!("the mouse did not take the config: {e}"))?;
+    if diff.is_empty() {
+        println!("Imported {path}; the config was already identical.");
+    } else {
+        println!("Imported {path}. Changed: {diff}");
+    }
+    Ok(())
 }
 
 fn list() -> Result<(), String> {
