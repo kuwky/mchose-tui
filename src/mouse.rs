@@ -268,7 +268,7 @@ impl DemoMouse {
         cfg.body[17] = 0x01 | 0x10;
         cfg.body[18] = 4;
         cfg.body[19] = 10;
-        cfg.body[49] = 30;
+        cfg.body[49] = 0;
         for slot in 0..proto::BUTTON_COUNT {
             cfg.set_button(slot, buttons::KIND_NATIVE, 0);
         }
@@ -337,7 +337,7 @@ impl Mouse for DemoMouse {
         ripple: bool,
         angle_snap: bool,
         motion_sync: bool,
-        _rotate: u8,
+        rotate: u8,
     ) -> io::Result<()> {
         let wanted = (self.cfg.sensor() & !0x1F)
             | (lod & 0x03)
@@ -345,6 +345,7 @@ impl Mouse for DemoMouse {
             | ((angle_snap as u8) << 3)
             | ((motion_sync as u8) << 4);
         self.cfg.body[17] = wanted;
+        self.cfg.body[49] = rotate;
         Ok(())
     }
 

@@ -360,6 +360,16 @@ impl Config {
         self.body[49]
     }
 
+    /// Sensor rotation is a signed byte in whole degrees. The vendor UI
+    /// limits it to -30..30.
+    pub fn rotate_degrees(&self) -> i16 {
+        rotation_degrees(self.body[49])
+    }
+
+    pub fn set_rotate_degrees(&mut self, degrees: i16) {
+        self.body[49] = rotation_raw(degrees);
+    }
+
     /// ripple, angle snap, motion sync (bits 2, 3, 4 of the sensor byte).
     pub fn perf_flags(&self) -> (bool, bool, bool) {
         let s = self.body[17];
@@ -384,6 +394,19 @@ fn game_mode_bits(mode: u8) -> u8 {
         3 => 0xC0,
         _ => 0x00,
     }
+}
+
+/// Raw sensor-rotation byte for a whole number of degrees. M HUB clamps the
+/// dial to -30..+30 and stores the signed value (negative values wrap to
+/// 226..255).
+pub fn rotation_raw(degrees: i16) -> u8 {
+    degrees.clamp(-30, 30) as i8 as u8
+}
+
+/// Decode the signed sensor-rotation byte. Values above 127 are negative, so
+/// `226` is -30 degrees.
+pub fn rotation_degrees(raw: u8) -> i16 {
+    raw as i8 as i16
 }
 
 /// `0x11 0x42`: lift-off, ripple, angle snap, motion sync, rotation.
@@ -419,7 +442,9 @@ pub fn set_flags(
     // the config byte. Send the current 1-3 value so changing a flag does not
     // silently reset the performance mode.
     let game_mode = before.game_mode();
-    let rotate_open = u8::from(rotate != 0);
+    // M HUB always sends `rotateOpen = 1`, including when it resets the angle
+    // to zero. Sending 0 for a zero angle leaves the old rotation in place on
+    // some firmware.
     send(
         dev,
         REPORT_SHORT,
@@ -432,7 +457,7 @@ pub fn set_flags(
             0,
             0,
             game_mode,
-            rotate_open,
+            1,
             rotate,
         ],
     )?;
@@ -642,5 +667,23 @@ mod tests {
         assert_eq!(s & 0xE0, 0x80);
         assert_eq!(s & 0x03, 2);
         assert_eq!(s & 0x1C, 0x1C);
+    }
+
+    #[test]
+    fn rotation_is_a_signed_byte_in_degrees() {
+        assert_eq!(rotation_raw(0), 0);
+        assert_eq!(rotation_raw(30), 30);
+        assert_eq!(rotation_raw(31), 30);
+        assert_eq!(rotation_raw(-30), 226);
+        assert_eq!(rotation_raw(-31), 226);
+        assert_eq!(rotation_degrees(0), 0);
+        assert_eq!(rotation_degrees(30), 30);
+        assert_eq!(rotation_degrees(226), -30);
+        assert_eq!(rotation_degrees(255), -1);
+
+        let mut c = Config { body: [0u8; 63] };
+        c.set_rotate_degrees(-12);
+        assert_eq!(c.rotate(), 244);
+        assert_eq!(c.rotate_degrees(), -12);
     }
 }

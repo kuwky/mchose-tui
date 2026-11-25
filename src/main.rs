@@ -14,7 +14,7 @@ const USAGE: &str = "\
 mchose-tui - configure MCHOSE gaming mice from a terminal
 
 Usage:
-  mchose-tui [--demo] [--device /dev/hidrawN] [--no-color]
+  mchose-tui [--demo] [--device /dev/hidrawN] [--no-color] [--accent #RRGGBB]
   mchose-tui --list
   mchose-tui --help
 
@@ -22,6 +22,7 @@ Options:
   --demo              run with a simulated L7 Ultra (no hardware needed)
   --device <path>     use this hidraw node instead of autodetection
   --no-color          disable ANSI colours
+  --accent #RRGGBB    TUI accent colour (default: follow the DPI LED colour)
   --list              list MCHOSE hidraw nodes and exit
   -h, --help          show this help
   -V, --version       show the version
@@ -29,11 +30,15 @@ Options:
 Keys:
   Up/Down or k/j      move          Left/Right or h/l   adjust
   Enter or Space      apply/edit    r                   refresh
-  b                   backup        f                   frame log
-  q                   quit
+  b                   backup        d                   config hex + diff
+  f                   frame log     q                   quit
 
 Press Enter on a button row to remap it. In the picker, type to filter,
 Up/Down to choose, Enter to apply, Esc to cancel.
+
+The mouse's bottom status LED colour is chosen by the firmware from the
+active DPI stage and cannot be changed over HID. The TUI accent can follow
+that colour or be set with --accent or the 'UI accent' row.
 
 The mouse's configuration interface is usually root-only. Install the
 included udev rule once (./install.sh does it), then replug the mouse.
@@ -56,6 +61,7 @@ fn run() -> Result<(), String> {
         demo: false,
         device: None,
         color: true,
+        accent: None,
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -73,6 +79,23 @@ fn run() -> Result<(), String> {
             }
             s if s.starts_with("--device=") => {
                 opts.device = Some(s["--device=".len()..].to_string());
+            }
+            "--accent" => {
+                i += 1;
+                let value = args
+                    .get(i)
+                    .ok_or_else(|| "--accent needs #RRGGBB".to_string())?;
+                opts.accent = Some(
+                    app::parse_hex_color(value)
+                        .ok_or_else(|| format!("--accent wants #RRGGBB, got {value:?}"))?,
+                );
+            }
+            s if s.starts_with("--accent=") => {
+                let value = &s["--accent=".len()..];
+                opts.accent = Some(
+                    app::parse_hex_color(value)
+                        .ok_or_else(|| format!("--accent wants #RRGGBB, got {value:?}"))?,
+                );
             }
             "--list" => {
                 list()?;

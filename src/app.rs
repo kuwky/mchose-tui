@@ -37,6 +37,7 @@ enum Row {
     Stage,
     Dpi(u8),
     Rate,
+    Rotation,
     Lod,
     Button(u8),
     Debounce,
@@ -44,10 +45,13 @@ enum Row {
     Motion,
     Ripple,
     Snap,
+    LedFollow,
+    Accent,
     Profile,
     Game,
     Backup,
     Restore,
+    Config,
     Log,
     Refresh,
 }
@@ -59,8 +63,15 @@ struct Item {
     value: String,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EditTarget {
+    Dpi(u8),
+    Rotation,
+    Accent,
+}
+
 struct Edit {
-    stage: u8,
+    target: EditTarget,
     buffer: String,
 }
 
@@ -74,7 +85,10 @@ pub struct Options {
     pub demo: bool,
     pub device: Option<String>,
     pub color: bool,
+    pub accent: Option<[u8; 3]>,
 }
+
+const DEFAULT_ACCENT: [u8; 3] = [0, 200, 220];
 
 pub struct App {
     mouse: Box<dyn Mouse>,
@@ -90,6 +104,9 @@ pub struct App {
     message: Message,
     confirm_restore: bool,
     show_log: bool,
+    show_config: bool,
+    accent_override: Option<[u8; 3]>,
+    accent_follows: bool,
     color: bool,
     demo: bool,
     last_poll: Instant,
@@ -102,7 +119,7 @@ pub fn open(opts: &Options) -> Result<App, String> {
     } else {
         Box::new(RealMouse::discover(opts.device.as_deref())?)
     };
-    App::new(mouse, opts.demo, opts.color).map_err(|e| {
+    App::new(mouse, opts.demo, opts.color, opts.accent).map_err(|e| {
         format!(
             "The interface was found but the mouse did not answer.\n\n{e}\n\n\
              Move the mouse to wake it, then press r to retry."
@@ -111,7 +128,12 @@ pub fn open(opts: &Options) -> Result<App, String> {
 }
 
 impl App {
-    fn new(mut mouse: Box<dyn Mouse>, demo: bool, color: bool) -> io::Result<Self> {
+    fn new(
+        mut mouse: Box<dyn Mouse>,
+        demo: bool,
+        color: bool,
+        accent: Option<[u8; 3]>,
+    ) -> io::Result<Self> {
         let identity = mouse.identity()?;
         let model = model_info(identity.pid, mouse.name());
         let version = mouse.version().unwrap_or_default();
@@ -141,6 +163,9 @@ impl App {
             message: Message::default(),
             confirm_restore: false,
             show_log: false,
+            show_config: false,
+            accent_override: accent,
+            accent_follows: accent.is_none(),
             color,
             demo,
             last_poll: Instant::now(),
@@ -176,6 +201,15 @@ impl App {
             self.handle_edit(key);
             return false;
         }
+        if self.show_config {
+            match key {
+                Key::Char('d') | Key::Esc => self.show_config = false,
+                Key::Char('r') => self.refresh(),
+                Key::Char('q') | Key::CtrlC => return true,
+                _ => {}
+            }
+            return false;
+        }
         if self.confirm_restore && key != Key::Enter && key != Key::Esc {
             self.confirm_restore = false;
         }
@@ -192,6 +226,7 @@ impl App {
             Key::Char('r') => self.refresh(),
             Key::Char('b') => self.backup(),
             Key::Char('f') => self.show_log = !self.show_log,
+            Key::Char('d') => self.show_config = true,
             Key::Char('q') | Key::CtrlC => return true,
             Key::Esc if self.confirm_restore => {
                 self.confirm_restore = false;
@@ -209,17 +244,40 @@ impl App {
             None => return,
         };
         match key {
-            Key::Enter => match edit.buffer.parse::<u16>() {
-                Ok(value) => self.apply_dpi(edit.stage, value),
-                Err(_) => self.err("DPI must be a number."),
+            Key::Enter => match edit.target {
+                EditTarget::Dpi(stage) => match edit.buffer.parse::<u16>() {
+                    Ok(value) => self.apply_dpi(stage, value),
+                    Err(_) => self.err("DPI must be a number."),
+                },
+                EditTarget::Rotation => match edit.buffer.parse::<i16>() {
+                    Ok(degrees) => self.apply_rotation(degrees),
+                    Err(_) => self.err("Rotation must be a whole number of degrees."),
+                },
+                EditTarget::Accent => match parse_hex_color(&edit.buffer) {
+                    Some(rgb) => self.apply_accent(rgb),
+                    None => self.err("Accent must be #RRGGBB."),
+                },
             },
             Key::Esc => self.info("Edit cancelled."),
             Key::Backspace => {
                 edit.buffer.pop();
                 self.edit = Some(edit);
             }
-            Key::Char(c) if c.is_ascii_digit() => {
-                if edit.buffer.len() < 5 {
+            Key::Char(c) => {
+                let allowed = match edit.target {
+                    EditTarget::Dpi(_) => c.is_ascii_digit(),
+                    EditTarget::Rotation => {
+                        c.is_ascii_digit() || (c == '-' && edit.buffer.is_empty())
+                    }
+                    EditTarget::Accent => {
+                        c.is_ascii_hexdigit() || (c == '#' && edit.buffer.is_empty())
+                    }
+                };
+                let max = match edit.target {
+                    EditTarget::Accent => 7,
+                    _ => 5,
+                };
+                if allowed && edit.buffer.len() < max {
                     edit.buffer.push(c);
                 }
                 self.edit = Some(edit);
@@ -385,10 +443,14 @@ impl App {
             return;
         };
         match row {
-            Row::Dpi(stage) => self.start_edit(stage),
+            Row::Dpi(stage) => self.start_dpi_edit(stage),
+            Row::Rotation => self.start_rotation_edit(),
+            Row::Accent => self.start_accent_edit(),
+            Row::LedFollow => self.toggle_accent_follow(),
             Row::Button(slot) => self.open_remap(slot),
             Row::Backup => self.backup(),
             Row::Restore => self.restore_prompt(),
+            Row::Config => self.show_config = true,
             Row::Log => self.show_log = !self.show_log,
             Row::Refresh => self.refresh(),
             Row::Motion | Row::Ripple | Row::Snap => self.toggle(row),
@@ -426,6 +488,13 @@ impl App {
                 let next = (self.active_rate_index() as i32 + delta).rem_euclid(n) as usize;
                 self.apply_rate(next);
             }
+            Row::Rotation => {
+                let current = self.config.rotate_degrees();
+                let next = (current as i32 + delta).clamp(-30, 30) as i16;
+                if next != current {
+                    self.apply_rotation(next);
+                }
+            }
             Row::Lod => {
                 let n = self.model.lod.len() as i32;
                 if n == 0 {
@@ -456,14 +525,15 @@ impl App {
                 let next = ((self.game_mode as i32 - 1 + delta).rem_euclid(3) + 1) as u8;
                 self.apply_game(next);
             }
+            Row::LedFollow => self.toggle_accent_follow(),
             Row::Motion | Row::Ripple | Row::Snap => self.toggle(row),
             _ => {}
         }
     }
 
-    fn start_edit(&mut self, stage: u8) {
+    fn start_dpi_edit(&mut self, stage: u8) {
         self.edit = Some(Edit {
-            stage,
+            target: EditTarget::Dpi(stage),
             buffer: self.config.dpi(stage as usize).to_string(),
         });
         self.message = Message {
@@ -473,6 +543,58 @@ impl App {
             ),
             kind: MsgKind::Info,
         };
+    }
+
+    fn start_rotation_edit(&mut self) {
+        self.edit = Some(Edit {
+            target: EditTarget::Rotation,
+            buffer: self.config.rotate_degrees().to_string(),
+        });
+        self.info("Editing sensor rotation in degrees (-30 to 30): Enter apply, Esc cancel.");
+    }
+
+    fn start_accent_edit(&mut self) {
+        self.edit = Some(Edit {
+            target: EditTarget::Accent,
+            buffer: hex_rgb(self.accent_color()),
+        });
+        self.info("Editing the TUI accent colour (not the mouse LED): #RRGGBB, Enter to apply.");
+    }
+
+    fn apply_accent(&mut self, rgb: [u8; 3]) {
+        self.accent_override = Some(rgb);
+        self.accent_follows = false;
+        self.ok(format!(
+            "TUI accent: {}  (the mouse LED is fixed by the firmware).",
+            hex_rgb(rgb)
+        ));
+    }
+
+    fn toggle_accent_follow(&mut self) {
+        self.accent_follows = !self.accent_follows;
+        if self.accent_follows {
+            self.ok(format!(
+                "TUI accent follows the DPI LED: {} now.",
+                led_color_name(self.active_stage())
+            ));
+        } else {
+            self.ok(format!(
+                "TUI accent fixed at {}.",
+                hex_rgb(self.accent_color())
+            ));
+        }
+    }
+
+    fn accent_color(&self) -> [u8; 3] {
+        if self.accent_follows {
+            stage_color(self.active_stage())
+        } else {
+            self.accent_override.unwrap_or(DEFAULT_ACCENT)
+        }
+    }
+
+    fn accent_code(&self) -> String {
+        rgb_code(self.accent_color(), true)
     }
 
     fn edit_config<F: FnOnce(&mut Config)>(&mut self, what: &str, change: F) {
@@ -594,6 +716,59 @@ impl App {
         }
         let (ripple, snap, sync) = self.config.perf_flags();
         self.apply_flags(ripple, snap, sync, index);
+    }
+
+    fn apply_rotation(&mut self, degrees: i16) {
+        let degrees = degrees.clamp(-30, 30);
+        let before = match self.mouse.read_config() {
+            Ok(c) => c,
+            Err(e) => {
+                self.err(format!("Could not read the mouse: {e}"));
+                return;
+            }
+        };
+        if let Err(e) = self.backup_once(&before) {
+            self.err(format!("Could not save the original config: {e}"));
+            return;
+        }
+        // Encode through Config so the signed byte math lives in one place.
+        let mut probe = before.clone();
+        probe.set_rotate_degrees(degrees);
+        let raw = probe.rotate();
+        let degrees = probe.rotate_degrees();
+        let (ripple, snap, sync) = before.perf_flags();
+        if let Err(e) = self
+            .mouse
+            .set_flags(self.lod_index, ripple, snap, sync, raw)
+        {
+            self.err(format!("Sensor rotation: failed ({e})"));
+            self.reload();
+            return;
+        }
+        sleep(Duration::from_millis(120));
+        match self.mouse.read_config() {
+            Ok(config) => {
+                self.config = config;
+                self.sync_lod_from_config();
+                if self.config.rotate() != raw {
+                    self.err(format!(
+                        "The mouse kept {}°, not {degrees}° (raw {} vs {raw}).",
+                        self.config.rotate_degrees(),
+                        self.config.rotate()
+                    ));
+                    return;
+                }
+                self.ok(format!(
+                    "Sensor rotation: {}° (raw {}).",
+                    self.config.rotate_degrees(),
+                    raw
+                ));
+            }
+            Err(e) => {
+                self.err(format!("Sensor rotation: read-back failed ({e})"));
+                self.reload();
+            }
+        }
     }
 
     fn apply_flags(&mut self, ripple: bool, snap: bool, sync: bool, lod: u8) {
@@ -858,14 +1033,20 @@ impl App {
         let mut items = Vec::new();
         let id = &self.identity;
 
+        let low_battery = id.battery <= 20 && id.charging == 0;
         let battery = if self.battery_stale {
             format!("{}  battery unreadable (mouse asleep?)", battery_bar(0, 12))
         } else {
             format!(
-                "{}  {}%{}",
+                "{}  {}%{}{}",
                 battery_bar(id.battery, 12),
                 id.battery,
-                if id.charging != 0 { "  charging" } else { "" }
+                if id.charging != 0 { "  charging" } else { "" },
+                if low_battery {
+                    "  low - charge soon"
+                } else {
+                    ""
+                }
             )
         };
         items.push(Item {
@@ -974,6 +1155,17 @@ impl App {
                 format!("{lod:.1} mm   (write-only)")
             },
         });
+        let rot = self.config.rotate_degrees();
+        items.push(Item {
+            group: "SENSOR",
+            row: Some(Row::Rotation),
+            label: "Sensor rotation".into(),
+            value: if rot == 0 {
+                format!("0°   (raw {})", self.config.rotate())
+            } else {
+                format!("{rot:+}°   (raw {})", self.config.rotate())
+            },
+        });
         let (ripple, snap, sync) = self.config.perf_flags();
         items.push(Item {
             group: "SENSOR",
@@ -992,6 +1184,50 @@ impl App {
             row: Some(Row::Snap),
             label: "Angle snap".into(),
             value: on_off(snap),
+        });
+
+        let palette = (0..stages)
+            .map(led_color_name)
+            .collect::<Vec<_>>()
+            .join(" · ");
+        items.push(Item {
+            group: "STATUS LED",
+            row: None,
+            label: "DPI LED palette".into(),
+            value: format!("{palette}   (fixed by firmware)"),
+        });
+        items.push(Item {
+            group: "STATUS LED",
+            row: None,
+            label: "DPI LED now".into(),
+            value: format!(
+                "{} · stage {} ({} DPI)",
+                led_color_name(active),
+                active + 1,
+                self.config.dpi(active as usize)
+            ),
+        });
+        items.push(Item {
+            group: "STATUS LED",
+            row: None,
+            label: "Custom LED colour".into(),
+            value: "not supported (0x11 0x2B ignored)".into(),
+        });
+        items.push(Item {
+            group: "STATUS LED",
+            row: Some(Row::LedFollow),
+            label: "UI accent follows LED".into(),
+            value: on_off(self.accent_follows),
+        });
+        items.push(Item {
+            group: "STATUS LED",
+            row: Some(Row::Accent),
+            label: "UI accent".into(),
+            value: if self.accent_follows {
+                format!("{}  (follows DPI LED)", hex_rgb(self.accent_color()))
+            } else {
+                format!("{}  (custom)", hex_rgb(self.accent_color()))
+            },
         });
 
         for info in buttons::BUTTONS {
@@ -1037,6 +1273,12 @@ impl App {
         });
         items.push(Item {
             group: "TOOLS",
+            row: Some(Row::Config),
+            label: "Config block".into(),
+            value: "hex dump + diff (d)".into(),
+        });
+        items.push(Item {
+            group: "TOOLS",
             row: Some(Row::Log),
             label: "Frame log".into(),
             value: if self.show_log {
@@ -1060,7 +1302,7 @@ impl App {
             if item.group != last_group {
                 lines.push(style(
                     &fit(&format!(" {}", item.group), width),
-                    "\x1b[1;36m",
+                    &self.accent_code(),
                     self.color,
                 ));
                 last_group = item.group;
@@ -1071,9 +1313,20 @@ impl App {
                     let marker = if selected { "> " } else { "  " };
                     let label = fit(&item.label, label_w);
                     let text = fit(&format!("{marker}{label}  {}", item.value), width);
+                    let item_color = match item.row {
+                        Some(Row::Stage) => Some(stage_color(self.active_stage())),
+                        Some(Row::Dpi(stage)) => Some(stage_color(stage)),
+                        _ => None,
+                    };
                     if selected {
                         selected_line = Some(lines.len());
-                        lines.push(style(&text, "\x1b[7m", self.color));
+                        let code = match item_color {
+                            Some(c) => format!("\x1b[7;38;2;{};{};{}m", c[0], c[1], c[2]),
+                            None => "\x1b[7m".to_string(),
+                        };
+                        lines.push(style(&text, &code, self.color));
+                    } else if let Some(c) = item_color {
+                        lines.push(style(&text, &rgb_code(c, false), self.color));
                     } else {
                         lines.push(text);
                     }
@@ -1089,7 +1342,15 @@ impl App {
                         ),
                         width,
                     );
-                    lines.push(style(&text, "\x1b[2m", self.color));
+                    if item.group == "STATUS LED" && item.label == "DPI LED now" {
+                        lines.push(style(
+                            &text,
+                            &rgb_code(stage_color(self.active_stage()), false),
+                            self.color,
+                        ));
+                    } else {
+                        lines.push(style(&text, "\x1b[2m", self.color));
+                    }
                 }
             }
         }
@@ -1150,13 +1411,90 @@ impl App {
         lines
     }
 
+    fn config_view(&self, width: usize, height: usize) -> Vec<String> {
+        let mut lines = Vec::new();
+        if height == 0 {
+            return lines;
+        }
+        lines.push(style(
+            &fit(" CONFIG BLOCK (live; * differs from original)", width),
+            &self.accent_code(),
+            self.color,
+        ));
+        let original = if self.demo {
+            None
+        } else {
+            state::load_original().ok()
+        };
+        let changed: Vec<(usize, u8, u8)> = match &original {
+            Some(orig) => (0..63)
+                .filter(|&i| self.config.body[i] != orig.body[i])
+                .map(|i| (i, self.config.body[i], orig.body[i]))
+                .collect(),
+            None => Vec::new(),
+        };
+        for row in 0..8 {
+            let start = row * 8;
+            if start >= 63 {
+                break;
+            }
+            let end = (start + 8).min(63);
+            let bytes = self.config.body[start..end]
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let mark = if changed.iter().any(|(i, _, _)| *i >= start && *i < end) {
+                "*"
+            } else {
+                " "
+            };
+            lines.push(fit(&format!("{mark}{start:02}  {bytes}"), width));
+            if lines.len() >= height {
+                return lines;
+            }
+        }
+        if lines.len() < height {
+            lines.push(style(&"─".repeat(width), "\x1b[2m", self.color));
+        }
+        if original.is_some() {
+            if changed.is_empty() {
+                if lines.len() < height {
+                    lines.push(fit(" No differences from the original backup.", width));
+                }
+            } else {
+                for chunk in changed.chunks(4) {
+                    if lines.len() >= height {
+                        break;
+                    }
+                    let parts = chunk
+                        .iter()
+                        .map(|(i, now, was)| format!("[{i:02}] {now:02x} (was {was:02x})"))
+                        .collect::<Vec<_>>()
+                        .join("  ");
+                    lines.push(fit(&format!(" {parts}"), width));
+                }
+            }
+        } else if lines.len() < height {
+            lines.push(fit(
+                " No original backup yet; it is saved before the first write.",
+                width,
+            ));
+        }
+        while lines.len() < height {
+            lines.push(fit("", width));
+        }
+        lines.truncate(height);
+        lines
+    }
+
     pub fn render(&self, width: usize, height: usize) -> String {
         let w = width.max(40);
         let h = height.max(12);
         let label_w = if w >= 80 { 26 } else { 18 };
 
         let available = h.saturating_sub(5);
-        let log_total = if self.show_log && self.remap.is_none() {
+        let log_total = if self.show_log && self.remap.is_none() && !self.show_config {
             (available.saturating_sub(3)).min((h / 4).clamp(2, 7) + 1)
         } else {
             0
@@ -1165,6 +1503,8 @@ impl App {
 
         let main_lines = if let Some(remap) = &self.remap {
             self.remap_view(remap, w, main_h)
+        } else if self.show_config {
+            self.config_view(w, main_h)
         } else {
             let (content, selected_line) = self.display_items(w, label_w);
             let start = if content.len() <= main_h {
@@ -1189,17 +1529,24 @@ impl App {
         } else {
             format!("{}%", self.identity.battery)
         };
+        let low_battery =
+            !self.battery_stale && self.identity.battery <= 20 && self.identity.charging == 0;
         let right = format!(
-            "{}  ·  {}{} ",
+            "{}  ·  {}{}{} ",
             link_name(self.identity.connect_mode),
             battery,
             if self.identity.charging != 0 {
                 " charging"
             } else {
                 ""
-            }
+            },
+            if low_battery { " LOW" } else { "" }
         );
-        lines.push(style(&join_lr(&left, &right, w), "\x1b[1;36m", self.color));
+        lines.push(style(
+            &join_lr(&left, &right, w),
+            &self.accent_code(),
+            self.color,
+        ));
         lines.push(style(&"─".repeat(w), "\x1b[2m", self.color));
 
         for line in &main_lines {
@@ -1207,7 +1554,7 @@ impl App {
         }
 
         if self.show_log {
-            lines.push(style(&fit(" FRAMES", w), "\x1b[1;36m", self.color));
+            lines.push(style(&fit(" FRAMES", w), &self.accent_code(), self.color));
             let entries = log_total.saturating_sub(1);
             let logs = proto::log_snapshot();
             let skip = logs.len().saturating_sub(entries);
@@ -1247,12 +1594,20 @@ impl App {
                 "\x1b[33m",
             )
         } else if let Some(edit) = &self.edit {
+            let (what, value) = match edit.target {
+                EditTarget::Dpi(stage) => (format!("DPI stage {}", stage + 1), edit.buffer.clone()),
+                EditTarget::Rotation => {
+                    ("sensor rotation".to_string(), format!("{}°", edit.buffer))
+                }
+                EditTarget::Accent => ("UI accent".to_string(), edit.buffer.clone()),
+            };
             (
-                format!(
-                    " Editing DPI stage {}: {}_   (Enter apply, Esc cancel)",
-                    edit.stage + 1,
-                    edit.buffer
-                ),
+                format!(" Editing {what}: {value}_   (Enter apply, Esc cancel)"),
+                "\x1b[33m",
+            )
+        } else if self.show_config {
+            (
+                " Config block: d or Esc to return, r to refresh".to_string(),
                 "\x1b[33m",
             )
         } else if self.confirm_restore {
@@ -1273,8 +1628,10 @@ impl App {
         lines.push(style(&fit(&status, w), code, self.color));
         let keys = if self.remap.is_some() {
             " Type to filter  Up/Down move  PgUp/PgDn jump  Enter apply  Esc cancel"
+        } else if self.show_config {
+            " d or Esc back  r refresh  q quit"
         } else {
-            " Up/Down move  Left/Right adjust  Enter edit/remap  r refresh  b backup  q quit"
+            " Up/Down move  Left/Right adjust  Enter edit  d config  r refresh  q quit"
         };
         lines.push(style(&fit(keys, w), "\x1b[2m", self.color));
         lines.join("\r\n")
@@ -1401,6 +1758,54 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     out
 }
 
+/// Parse `#RRGGBB` or `RRGGBB` into an RGB triple.
+pub fn parse_hex_color(s: &str) -> Option<[u8; 3]> {
+    let s = s.trim().trim_start_matches('#');
+    if s.len() != 6 || !s.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let r = u8::from_str_radix(&s[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&s[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&s[4..6], 16).ok()?;
+    Some([r, g, b])
+}
+
+fn hex_rgb(c: [u8; 3]) -> String {
+    format!("#{:02X}{:02X}{:02X}", c[0], c[1], c[2])
+}
+
+fn rgb_code(c: [u8; 3], bold: bool) -> String {
+    if bold {
+        format!("\x1b[1;38;2;{};{};{}m", c[0], c[1], c[2])
+    } else {
+        format!("\x1b[38;2;{};{};{}m", c[0], c[1], c[2])
+    }
+}
+
+/// The L7 manual's fixed DPI indicator palette. The firmware chooses the
+/// colour from the stage index; it is not an addressable RGB setting.
+fn stage_color(stage: u8) -> [u8; 3] {
+    match stage {
+        0 => [255, 70, 70],
+        1 => [80, 140, 255],
+        2 => [70, 220, 100],
+        3 => [255, 220, 60],
+        4 => [60, 220, 220],
+        _ => [190, 110, 255],
+    }
+}
+
+fn led_color_name(stage: u8) -> &'static str {
+    match stage {
+        0 => "red",
+        1 => "blue",
+        2 => "green",
+        3 => "yellow",
+        4 => "cyan",
+        _ => "purple",
+    }
+}
+
 fn on_off(value: bool) -> String {
     if value {
         "on".into()
@@ -1466,5 +1871,84 @@ mod tests {
         // Taking the only remaining left click away leaves none.
         c.set_button(1, buttons::KIND_MOUSE, 0x020000);
         assert_eq!(left_click_count(&c), 0);
+    }
+
+    #[test]
+    fn hex_colour_parsing_is_strict() {
+        assert_eq!(parse_hex_color("#00C8DC"), Some([0, 200, 220]));
+        assert_eq!(parse_hex_color("00c8dc"), Some([0, 200, 220]));
+        assert_eq!(parse_hex_color(" #FF0000 "), Some([255, 0, 0]));
+        assert_eq!(parse_hex_color("#12345"), None);
+        assert_eq!(parse_hex_color("#gggggg"), None);
+        assert_eq!(parse_hex_color(""), None);
+        assert_eq!(parse_hex_color("#1234567"), None);
+    }
+
+    #[test]
+    fn led_palette_has_six_distinct_named_colours() {
+        let names: Vec<_> = (0..6).map(led_color_name).collect();
+        assert_eq!(names, ["red", "blue", "green", "yellow", "cyan", "purple"]);
+        let mut seen = Vec::new();
+        for stage in 0..6 {
+            let c = stage_color(stage);
+            assert!(!seen.contains(&c), "stage {stage} repeats a colour");
+            seen.push(c);
+        }
+        // Out-of-range stages fall back to the last (purple) entry.
+        assert_eq!(stage_color(9), stage_color(5));
+        assert_eq!(led_color_name(9), "purple");
+    }
+
+    fn demo_app(accent: Option<[u8; 3]>) -> App {
+        App::new(Box::new(DemoMouse::new()), true, true, accent).expect("demo app")
+    }
+
+    #[test]
+    fn accent_defaults_to_the_led_and_accepts_an_override() {
+        let mut app = demo_app(None);
+        assert!(app.accent_follows);
+        assert_eq!(app.accent_color(), stage_color(app.active_stage()));
+
+        app.toggle_accent_follow();
+        assert!(!app.accent_follows);
+        assert_eq!(app.accent_color(), DEFAULT_ACCENT);
+
+        let mut app = demo_app(Some([0x12, 0x34, 0x56]));
+        assert!(!app.accent_follows);
+        assert_eq!(app.accent_color(), [0x12, 0x34, 0x56]);
+
+        app.apply_accent([0, 200, 220]);
+        assert_eq!(app.accent_color(), [0, 200, 220]);
+        assert!(app.accent_code().contains("38;2;0;200;220"));
+    }
+
+    #[test]
+    fn rotation_round_trips_through_the_demo_protocol() {
+        let mut app = demo_app(None);
+        app.apply_rotation(-12);
+        assert_eq!(app.config.rotate(), 244);
+        assert_eq!(app.config.rotate_degrees(), -12);
+
+        // Out-of-range values are clamped before they reach the wire.
+        app.apply_rotation(99);
+        assert_eq!(app.config.rotate_degrees(), 30);
+
+        app.apply_rotation(0);
+        assert_eq!(app.config.rotate(), 0);
+    }
+
+    #[test]
+    fn config_view_dumps_the_whole_block() {
+        let mut app = demo_app(None);
+        app.show_config = true;
+        let screen = app.render(100, 40);
+        assert!(screen.contains("CONFIG BLOCK"));
+        for start in [0, 8, 16, 24, 32, 40, 48, 56] {
+            assert!(
+                screen.contains(&format!("{start:02}  ")),
+                "missing row starting at {start}"
+            );
+        }
+        assert!(screen.contains("Config block: d or Esc"));
     }
 }
