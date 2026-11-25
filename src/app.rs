@@ -141,6 +141,193 @@ pub fn open(opts: &Options) -> Result<App, String> {
     })
 }
 
+/// Read every setting and render it as plain, aligned text. The format is
+/// deliberately simple so it can be diffed or parsed by a script.
+pub fn dump(opts: &Options) -> Result<String, String> {
+    let mut mouse = open_mouse(opts)?;
+    let identity = mouse
+        .identity()
+        .map_err(|e| format!("cannot read the mouse identity: {e}"))?;
+    let model = model_info(identity.pid, mouse.name());
+    let version = mouse.version().unwrap_or_default();
+    let config = mouse
+        .read_config()
+        .map_err(|e| format!("cannot read the config: {e}"))?;
+
+    let stages = config.enabled_stages().clamp(1, DPI_STAGES as u8);
+    let active = if identity.connect_mode == 0 {
+        config.wired_dpi_stage()
+    } else {
+        config.wireless_dpi_stage()
+    }
+    .min(stages - 1);
+    let rate_index = if identity.connect_mode == 0 {
+        config.wired_rate_index()
+    } else {
+        config.wireless_rate_index()
+    };
+    let lod_index = if opts.demo {
+        model.default_lod
+    } else if model.lod_in_sensor {
+        config
+            .lod_index()
+            .min(model.lod.len().saturating_sub(1) as u8)
+    } else {
+        state::load_lod(identity.pid, model.default_lod)
+            .min(model.lod.len().saturating_sub(1) as u8)
+    };
+
+    let mut out: Vec<String> = Vec::new();
+    out.push(mouse.name().to_string());
+    field(
+        &mut out,
+        "Interface",
+        format!(
+            "{}  ({:04x}:{:04x})",
+            mouse.path(),
+            identity.vid,
+            identity.pid
+        ),
+    );
+    field(
+        &mut out,
+        "Link",
+        format!(
+            "{}  ·  {}",
+            link_name(identity.connect_mode),
+            if identity.connected {
+                "online"
+            } else {
+                "offline"
+            }
+        ),
+    );
+    field(
+        &mut out,
+        "Firmware",
+        if version.is_empty() {
+            format!("0x{:08x}", identity.firmware)
+        } else {
+            version
+        },
+    );
+    field(
+        &mut out,
+        "Battery",
+        format!(
+            "{}%{}",
+            identity.battery,
+            if identity.charging != 0 {
+                "  charging"
+            } else {
+                ""
+            }
+        ),
+    );
+
+    section(&mut out, "PERFORMANCE");
+    field(
+        &mut out,
+        "Active DPI stage",
+        format!(
+            "{} / {}  ({} DPI)",
+            active + 1,
+            stages,
+            config.dpi(active as usize)
+        ),
+    );
+    for stage in 0..stages {
+        let x = config.dpi(stage as usize);
+        let y = config.dpi_y(stage as usize);
+        let value = if y != 0 && y != x {
+            format!("{x} x {y} DPI")
+        } else {
+            format!("{x} DPI")
+        };
+        field(&mut out, &format!("DPI stage {}", stage + 1), value);
+    }
+    field(
+        &mut out,
+        "Polling rate",
+        match model.rates.get(rate_index as usize) {
+            Some(hz) => format!("{hz} Hz"),
+            None => format!("index {rate_index}"),
+        },
+    );
+    field(&mut out, "Debounce", format!("{} ms", config.debounce_ms()));
+    field(
+        &mut out,
+        "Sleep",
+        match config.sleep_minutes() {
+            0 => "off".to_string(),
+            n => format!("{n} min"),
+        },
+    );
+
+    section(&mut out, "SENSOR");
+    let lod = model.lod.get(lod_index as usize).copied().unwrap_or(0.0);
+    field(
+        &mut out,
+        "Lift-off distance",
+        format!(
+            "{lod:.1} mm{}",
+            if model.lod_in_sensor {
+                ""
+            } else {
+                "  (write-only)"
+            }
+        ),
+    );
+    let rot = config.rotate_degrees();
+    field(
+        &mut out,
+        "Sensor rotation",
+        if rot == 0 {
+            format!("0°  (raw {})", config.rotate())
+        } else {
+            format!("{rot:+}°  (raw {})", config.rotate())
+        },
+    );
+    let (ripple, snap, sync) = config.perf_flags();
+    field(&mut out, "Motion sync", on_off(sync));
+    field(&mut out, "Ripple control", on_off(ripple));
+    field(&mut out, "Angle snap", on_off(snap));
+
+    section(&mut out, "BUTTONS");
+    for info in buttons::BUTTONS {
+        let (kind, value) = config.button(info.slot as usize);
+        let text = if kind == buttons::KIND_MACRO {
+            match mouse.macro_name(info.wire) {
+                Ok(name) if !name.trim().is_empty() => format!("Macro · {name}"),
+                _ => "Macro".to_string(),
+            }
+        } else {
+            buttons::describe(kind, value)
+        };
+        field(&mut out, &format!("{} button", info.name), text);
+    }
+
+    section(&mut out, "PROFILE");
+    field(&mut out, "Profile", format!("{} / 3", config.profile() + 1));
+    field(&mut out, "Game mode", config.game_mode().to_string());
+
+    section(&mut out, "RAW CONFIG");
+    out.push(format!("  {}", proto::hex(&config.body)));
+
+    Ok(out.join("\n"))
+}
+
+fn section(out: &mut Vec<String>, title: &str) {
+    if !out.is_empty() {
+        out.push(String::new());
+    }
+    out.push(title.to_string());
+}
+
+fn field(out: &mut Vec<String>, label: &str, value: impl Into<String>) {
+    out.push(format!("  {label:<18}  {}", value.into()));
+}
+
 impl App {
     fn new(
         mut mouse: Box<dyn Mouse>,
@@ -2389,5 +2576,36 @@ mod tests {
             );
         }
         assert!(screen.contains("Config block: d or Esc"));
+    }
+
+    #[test]
+    fn the_cli_dump_lists_every_section() {
+        let opts = Options {
+            demo: true,
+            device: None,
+            color: false,
+            accent: None,
+        };
+        let text = dump(&opts).unwrap();
+        for needle in [
+            "MCHOSE L7 Ultra (demo)",
+            "Interface",
+            "PERFORMANCE",
+            "Active DPI stage",
+            "DPI stage 1",
+            "400 DPI",
+            "Polling rate",
+            "SENSOR",
+            "Lift-off distance",
+            "BUTTONS",
+            "Left button",
+            "PROFILE",
+            "Game mode",
+            "RAW CONFIG",
+        ] {
+            assert!(text.contains(needle), "missing {needle:?} in:\n{text}");
+        }
+        let raw = text.lines().last().unwrap();
+        assert_eq!(raw.split_whitespace().count(), 63);
     }
 }

@@ -92,7 +92,7 @@ no browser, no daemon.
   the vendor's `0x12 0x55` / `0x12 0x53` commands and bound as button type 4.
 - **Config export/import**: `--export FILE` saves the 63-byte config block and
   `--import FILE` writes it back, with the same validation and read-back as the
-  interactive writes.
+  interactive writes. `--dump` prints the same settings in human-readable form.
 - **Profiles** 1–3 and **game mode** 1–3. The game mode is stored in the
   high bits of the sensor byte, so it is read back from the config block and
   changed with the same command as the other sensor settings. Changing a
@@ -174,6 +174,7 @@ mchose-tui --no-color
 mchose-tui --accent '#FF8800'
 mchose-tui --export mouse-config.bin
 mchose-tui --import mouse-config.bin
+mchose-tui --dump
 ```
 
 `--export` writes exactly the 63-byte config block, so it can be diffed with
@@ -181,6 +182,12 @@ mchose-tui --import mouse-config.bin
 refuses an all-zero block. The current config is backed up before the import,
 then the file is written and read back like every other change. Both options
 work with `--demo` and `--device`.
+
+`--dump` prints every setting as plain, aligned text: device and link info,
+the DPI ladder, polling rate, debounce, sleep, sensor options, all button
+bindings (including macro names), profile, game mode, and the raw config
+block. It is meant for a quick check or for scripts; it never writes to the
+mouse.
 
 ### Keys
 

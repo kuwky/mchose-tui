@@ -18,6 +18,7 @@ Usage:
   mchose-tui [--demo] [--device /dev/hidrawN] [--no-color] [--accent #RRGGBB]
   mchose-tui --export FILE [--device /dev/hidrawN]
   mchose-tui --import FILE [--device /dev/hidrawN]
+  mchose-tui --dump [--device /dev/hidrawN]
   mchose-tui --list
   mchose-tui --help
 
@@ -28,6 +29,7 @@ Options:
   --accent #RRGGBB    TUI accent colour (default: follow the DPI flash colour)
   --export FILE       write the 63-byte config block to FILE and exit
   --import FILE       restore a 63-byte config block from FILE and exit
+  --dump              print every setting as plain text and exit
   --list              list MCHOSE hidraw nodes and exit
   -h, --help          show this help
   -V, --version       show the version
@@ -77,6 +79,7 @@ fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut export = None;
     let mut import = None;
+    let mut dump = false;
     let mut i = 0;
     while i < args.len() {
         let arg = &args[i];
@@ -115,6 +118,7 @@ fn run() -> Result<(), String> {
             s if s.starts_with("--import=") => {
                 import = Some(s["--import=".len()..].to_string());
             }
+            "--dump" => dump = true,
             "--accent" => {
                 i += 1;
                 let value = args
@@ -151,13 +155,24 @@ fn run() -> Result<(), String> {
     if export.is_some() && import.is_some() {
         return Err("--export and --import cannot be used together".into());
     }
+    if dump && (export.is_some() || import.is_some()) {
+        return Err("--dump cannot be used with --export or --import".into());
+    }
     if let Some(path) = export {
         return export_config(&opts, &path);
     }
     if let Some(path) = import {
         return import_config(&opts, &path);
     }
+    if dump {
+        return dump_config(&opts);
+    }
     run_tui(opts)
+}
+
+fn dump_config(opts: &Options) -> Result<(), String> {
+    println!("{}", app::dump(opts)?);
+    Ok(())
 }
 
 fn export_config(opts: &Options, path: &str) -> Result<(), String> {
