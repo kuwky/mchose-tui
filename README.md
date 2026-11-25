@@ -60,7 +60,11 @@ no daemon.
   buttons, DPI switches, media keys, system actions, profiles, disable, and 142
   keyboard keys and shortcuts. The picker filters as you type. The DPI button
   is fixed by the firmware — M HUB does not expose it either.
-- **Profiles** 1–3 and **game mode** 1–3.
+- **Profiles** 1–3 and **game mode** 1–3. The game mode is stored in the
+  high bits of the sensor byte, so it is read back from the config block and
+  changed with the same command as the other sensor settings. Changing a
+  sensor flag preserves it, and changing the mode preserves LOD, rotation and
+  the flags.
 - **Backup / restore** of the 63-byte configuration block.
 - **Frame log** (`f`) showing every HID frame sent and received.
 - **Demo mode** (`--demo`) to explore the UI without hardware.

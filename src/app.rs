@@ -116,7 +116,7 @@ impl App {
         let model = model_info(identity.pid, mouse.name());
         let version = mouse.version().unwrap_or_default();
         let config = mouse.read_config()?;
-        let game_mode = mouse.game_mode().unwrap_or(0);
+        let game_mode = config.game_mode();
         let lod_index = if demo {
             model.default_lod
         } else if model.lod_in_sensor {
@@ -514,11 +514,9 @@ impl App {
 
     fn reload(&mut self) {
         if let Ok(config) = self.mouse.read_config() {
+            self.game_mode = config.game_mode();
             self.config = config;
             self.sync_lod_from_config();
-        }
-        if let Ok(game) = self.mouse.game_mode() {
-            self.game_mode = game;
         }
     }
 
@@ -716,9 +714,11 @@ impl App {
         }
         for attempt in 0..5 {
             sleep(Duration::from_millis(60 * (attempt + 1)));
-            match self.mouse.game_mode() {
-                Ok(got) if got == mode => {
+            match self.mouse.read_config() {
+                Ok(config) if config.game_mode() == mode => {
+                    self.config = config;
                     self.game_mode = mode;
+                    self.sync_lod_from_config();
                     self.ok(format!("Game mode {mode}."));
                     return;
                 }
@@ -748,14 +748,11 @@ impl App {
         }
         match self.mouse.read_config() {
             Ok(config) => {
+                self.game_mode = config.game_mode();
                 self.config = config;
                 self.sync_lod_from_config();
             }
             Err(e) => errors.push(format!("config: {e}")),
-        }
-        match self.mouse.game_mode() {
-            Ok(game) => self.game_mode = game,
-            Err(e) => errors.push(format!("game mode: {e}")),
         }
         match self.mouse.version() {
             Ok(v) if !v.is_empty() => self.version = v,

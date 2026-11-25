@@ -301,6 +301,16 @@ impl Config {
         self.body[17]
     }
 
+    /// The game mode lives in bits 6-7 of the sensor byte: `0b00` is mode 1,
+    /// `0b10` is mode 2 and `0b11` is mode 3, matching M HUB.
+    pub fn game_mode(&self) -> u8 {
+        game_mode_from_sensor(self.body[17])
+    }
+
+    pub fn set_game_mode(&mut self, mode: u8) {
+        self.body[17] = (self.body[17] & !0xC0) | game_mode_bits(mode);
+    }
+
     /// The LOD index lives in the low two bits of the sensor byte on the
     /// 42 000 DPI models. It is updated by `0x11 0x42` and can be read back.
     pub fn lod_index(&self) -> u8 {
@@ -357,6 +367,25 @@ impl Config {
     }
 }
 
+/// Map the sensor byte's game-mode bits to the 1-3 number used by the UI.
+fn game_mode_from_sensor(sensor: u8) -> u8 {
+    match sensor & 0xC0 {
+        0x80 => 2,
+        0xC0 => 3,
+        _ => 1,
+    }
+}
+
+/// Inverse of [`game_mode_from_sensor`], as the two bits stored in the config
+/// block. `0x42` itself takes the 1-3 number directly.
+fn game_mode_bits(mode: u8) -> u8 {
+    match mode {
+        2 => 0x80,
+        3 => 0xC0,
+        _ => 0x00,
+    }
+}
+
 /// `0x11 0x42`: lift-off, ripple, angle snap, motion sync, rotation.
 /// Turning a flag off needs the config-block write too, so reconcile.
 fn reconciled_sensor(
@@ -387,9 +416,9 @@ pub fn set_flags(
 ) -> io::Result<()> {
     let before = Config::read(dev)?;
     // The `gameMode` argument of `0x42` carries the sensor mode in bits 6-7 of
-    // the config byte. Send the current value so changing a flag does not
+    // the config byte. Send the current 1-3 value so changing a flag does not
     // silently reset the performance mode.
-    let game_mode = (before.sensor() >> 6) & 0x03;
+    let game_mode = before.game_mode();
     let rotate_open = u8::from(rotate != 0);
     send(
         dev,
@@ -453,9 +482,42 @@ pub fn set_profile(dev: &HidRaw, profile: u8) -> io::Result<()> {
     send(dev, REPORT_SHORT, &[0x58, profile])
 }
 
-/// `0x11 0x02`.
+/// `0x11 0x42` with the current sensor flags. The game mode is stored in
+/// bits 6-7 of the sensor byte and is not readable through `0x11 0x03` on the
+/// config node, so it is read back from the config block instead.
 pub fn set_game_mode(dev: &HidRaw, mode: u8) -> io::Result<()> {
-    send(dev, REPORT_SHORT, &[0x02, mode])
+    if !(1..=3).contains(&mode) {
+        return Err(invalid(format!("game mode {mode} out of range")));
+    }
+    let before = Config::read(dev)?;
+    let (ripple, angle_snap, motion_sync) = before.perf_flags();
+    let rotate = before.rotate();
+    send(
+        dev,
+        REPORT_SHORT,
+        &[
+            0x42,
+            before.lod_index(),
+            ripple as u8,
+            angle_snap as u8,
+            motion_sync as u8,
+            0,
+            0,
+            mode,
+            u8::from(rotate != 0),
+            rotate,
+        ],
+    )?;
+    sleep(Duration::from_millis(120));
+    for _ in 0..5 {
+        if Config::read(dev)?.game_mode() == mode {
+            return Ok(());
+        }
+        sleep(Duration::from_millis(100));
+    }
+    Err(invalid(format!(
+        "the mouse would not enter game mode {mode}"
+    )))
 }
 
 /// `0x12 0x52`: remap one button. `wire` is the index used by this command,
@@ -479,15 +541,6 @@ pub fn set_button(dev: &HidRaw, wire: u8, kind: u8, value: u32) -> io::Result<()
             value as u8,
         ],
     )
-}
-
-/// Read `0x11 0x03`: bond, vid, pid, link, game mode.
-pub fn basics(dev: &HidRaw) -> io::Result<(u16, u16, u8, u8)> {
-    let d = request(dev, REPORT_SHORT, &[0x03])?;
-    if d.len() < 7 {
-        return Err(invalid("short basics reply"));
-    }
-    Ok((u16le(&d, 1), u16le(&d, 3), d[5], d[6]))
 }
 
 /// Poll until the written block reads back, allowing for the bytes the mouse
@@ -550,6 +603,26 @@ mod tests {
     #[test]
     fn hex_is_spaced() {
         assert_eq!(hex(&[0x11, 0xab, 0x00]), "11 ab 00");
+    }
+
+    #[test]
+    fn game_mode_uses_the_sensor_high_bits() {
+        let mut c = Config { body: [0u8; 63] };
+        for (bits, mode) in [(0x00, 1), (0x80, 2), (0xC0, 3)] {
+            c.body[17] = bits | 0x1C;
+            assert_eq!(c.game_mode(), mode);
+        }
+        // Bit 6 alone is not a mode the vendor app produces; treat it as 1.
+        c.body[17] = 0x40;
+        assert_eq!(c.game_mode(), 1);
+
+        c.body[17] = 0x1C;
+        c.set_game_mode(2);
+        assert_eq!(c.body[17], 0x9C);
+        c.set_game_mode(3);
+        assert_eq!(c.body[17], 0xDC);
+        c.set_game_mode(1);
+        assert_eq!(c.body[17], 0x1C);
     }
 
     #[test]

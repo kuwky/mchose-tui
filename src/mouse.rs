@@ -62,7 +62,6 @@ pub trait Mouse {
     ) -> io::Result<()>;
     fn set_profile(&mut self, profile: u8) -> io::Result<()>;
     fn set_game_mode(&mut self, mode: u8) -> io::Result<()>;
-    fn game_mode(&mut self) -> io::Result<u8>;
 }
 
 pub struct RealMouse {
@@ -185,10 +184,6 @@ impl Mouse for RealMouse {
     fn set_game_mode(&mut self, mode: u8) -> io::Result<()> {
         proto::set_game_mode(&self.dev, mode)
     }
-
-    fn game_mode(&mut self) -> io::Result<u8> {
-        proto::basics(&self.dev).map(|(_, _, _, game)| game)
-    }
 }
 
 fn discovery_error(all: &[Node], failures: &[(Node, String)]) -> String {
@@ -257,8 +252,6 @@ fn discovery_error(all: &[Node], failures: &[(Node, String)]) -> String {
 
 pub struct DemoMouse {
     cfg: Config,
-    lod: u8,
-    game: u8,
 }
 
 impl DemoMouse {
@@ -279,11 +272,7 @@ impl DemoMouse {
         for slot in 0..proto::BUTTON_COUNT {
             cfg.set_button(slot, buttons::KIND_NATIVE, 0);
         }
-        Self {
-            cfg,
-            lod: 1,
-            game: 1,
-        }
+        Self { cfg }
     }
 }
 
@@ -350,7 +339,6 @@ impl Mouse for DemoMouse {
         motion_sync: bool,
         _rotate: u8,
     ) -> io::Result<()> {
-        self.lod = lod;
         let wanted = (self.cfg.sensor() & !0x1F)
             | (lod & 0x03)
             | ((ripple as u8) << 2)
@@ -366,12 +354,14 @@ impl Mouse for DemoMouse {
     }
 
     fn set_game_mode(&mut self, mode: u8) -> io::Result<()> {
-        self.game = mode;
+        if !(1..=3).contains(&mode) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("game mode {mode} out of range"),
+            ));
+        }
+        self.cfg.set_game_mode(mode);
         Ok(())
-    }
-
-    fn game_mode(&mut self) -> io::Result<u8> {
-        Ok(self.game)
     }
 }
 
