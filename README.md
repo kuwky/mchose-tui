@@ -1,5 +1,8 @@
 # mchose-tui
 
+## ! Created using AI !
+### ! Only the L/M//A/K7-family protocol is implemented !
+
 A tiny, dependency-free terminal UI for configuring **MCHOSE** gaming mice on Linux.
 
 DPI stages, polling rate, lift-off distance, sensor rotation, debounce, sleep,
