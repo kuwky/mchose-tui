@@ -1,7 +1,8 @@
 # mchose-tui
 
 ## ! Created using AI !
-### ! Only the L/M/A/K7-family protocol is implemented !
+
+#### Supported: MCHOSE L7-family (L7, L7 Pro, L7 Ultra, M7, A7, K7). Not supported: A5/AX5 Pro and G3 families.
 
 A tiny, dependency-free terminal UI for configuring **MCHOSE** gaming mice on Linux.
 
