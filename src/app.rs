@@ -574,7 +574,7 @@ impl App {
         self.accent_follows = !self.accent_follows;
         if self.accent_follows {
             self.ok(format!(
-                "TUI accent follows the DPI LED: {} now.",
+                "TUI accent follows the DPI flash colour: {} now.",
                 led_color_name(self.active_stage())
             ));
         } else {
@@ -1193,13 +1193,13 @@ impl App {
         items.push(Item {
             group: "STATUS LED",
             row: None,
-            label: "DPI LED palette".into(),
+            label: "DPI flash palette".into(),
             value: format!("{palette}   (fixed by firmware)"),
         });
         items.push(Item {
             group: "STATUS LED",
             row: None,
-            label: "DPI LED now".into(),
+            label: "DPI flash colour".into(),
             value: format!(
                 "{} · stage {} ({} DPI)",
                 led_color_name(active),
@@ -1210,8 +1210,8 @@ impl App {
         items.push(Item {
             group: "STATUS LED",
             row: None,
-            label: "Custom LED colour".into(),
-            value: "not supported (0x11 0x2B ignored)".into(),
+            label: "Steady LED".into(),
+            value: "status/charge indicator, not addressable".into(),
         });
         items.push(Item {
             group: "STATUS LED",
@@ -1224,7 +1224,7 @@ impl App {
             row: Some(Row::Accent),
             label: "UI accent".into(),
             value: if self.accent_follows {
-                format!("{}  (follows DPI LED)", hex_rgb(self.accent_color()))
+                format!("{}  (follows DPI flash)", hex_rgb(self.accent_color()))
             } else {
                 format!("{}  (custom)", hex_rgb(self.accent_color()))
             },
@@ -1342,7 +1342,7 @@ impl App {
                         ),
                         width,
                     );
-                    if item.group == "STATUS LED" && item.label == "DPI LED now" {
+                    if item.group == "STATUS LED" && item.label == "DPI flash colour" {
                         lines.push(style(
                             &text,
                             &rgb_code(stage_color(self.active_stage()), false),

@@ -5,7 +5,7 @@ A tiny, dependency-free terminal UI for configuring **MCHOSE** gaming mice on Li
 DPI stages, polling rate, lift-off distance, sensor rotation, debounce, sleep,
 motion sync, ripple control, angle snap, button remapping, profiles, game mode,
 battery and charging — all from one keyboard-driven screen. Plus a raw config
-hex/diff view and a UI accent that follows the mouse's DPI LED colour. No vendor
+hex/diff view and a UI accent that follows the mouse's DPI flash palette. No vendor
 driver, no browser, no daemon.
 
 ```
@@ -34,11 +34,11 @@ driver, no browser, no daemon.
   Ripple control              off
   Angle snap                  off
  STATUS LED
-   DPI LED palette             red · blue · green · yellow · cyan · purple   (fixed by firmware)
-   DPI LED now                 green · stage 3 (1600 DPI)
-   Custom LED colour           not supported (0x11 0x2B ignored)
+   DPI flash palette           red · blue · green · yellow · cyan · purple   (fixed by firmware)
+   DPI flash colour            green · stage 3 (1600 DPI)
+   Steady LED                  status/charge indicator, not addressable
   UI accent follows LED       on
-  UI accent                   #46DC64  (follows DPI LED)
+  UI accent                   #46DC64  (follows DPI flash colour)
  BUTTONS
   Left button                 Default (native)
   Middle button               Default (native)
@@ -71,13 +71,14 @@ driver, no browser, no daemon.
   `0x11 0x42` command M HUB uses and read back from the config block.
 - **Debounce** (0–30 ms) and **sleep timeout** (0–60 min, 0 = off).
 - **Sensor flags**: motion sync, ripple control, angle snap.
-- **Status-LED palette reference**: the bottom LED colour is chosen by the
-  firmware from the active DPI stage (L7 Ultra: 400 red, 800 blue, 1600 green,
-  3200 yellow, 6400 cyan, 42 000 purple). The UI shows the palette and the
-  current colour. The standard lighting command `0x11 0x2B` is accepted by the
-  transport but **ignored by L7 Ultra firmware**, so the colour is not
-  addressable; the row says so instead of pretending.
-- **UI accent**: the TUI's highlight colour follows the DPI LED colour by
+- **DPI flash palette reference**: the bottom LED briefly flashes the colour of
+  the newly selected DPI stage (L7 Ultra: 400 red, 800 blue, 1600 green, 3200
+  yellow, 6400 cyan, 42 000 purple), then returns to the steady status/charge
+  colour. The UI shows the palette and the colour the next change will flash.
+  The standard lighting command `0x11 0x2B` is accepted by the transport but
+  **ignored by L7 Ultra firmware**, so neither the flash nor the steady colour
+  can be chosen over HID; the row says so instead of pretending.
+- **UI accent**: the TUI's highlight colour follows the DPI flash colour by
   default, can be pinned with `--accent #RRGGBB`, or changed in the **STATUS
   LED** group. This is a terminal colour only — it never writes to the mouse.
 - **Button remapping** for the five remappable buttons: native action, mouse
@@ -189,7 +190,7 @@ one-degree steps.
 
 **UI accent** is set with `--accent #RRGGBB`, `--accent=#RRGGBB`, or the
 **STATUS LED → UI accent** row. **UI accent follows LED** switches between the
-active stage's DPI-LED colour and a fixed custom colour. This only changes the
+active stage's DPI flash colour and a fixed custom colour. This only changes the
 terminal; the mouse LED cannot be addressed on the L7 Ultra.
 
 **Config block** (`d`) shows all 63 bytes as eight hex rows. A `*` marks a row
@@ -264,11 +265,14 @@ a different value before the first run. On the 42 000 DPI models the value is
 read back from the config block, so the screen shows the real index.
 
 **The bottom LED colour cannot be changed**
-That is a firmware limitation, not a bug. On the L7 Ultra the bottom LED shows
-the DPI-stage palette (red / blue / green / yellow / cyan / purple). The vendor
-M HUB build for this model exposes no lighting tab, and `0x11 0x2B` lighting
-writes are silently ignored. The TUI reports this in the **STATUS LED** group
-and uses the same palette for its own accent colour where it can.
+That is a firmware limitation, not a bug. On the L7 Ultra the bottom LED only
+flashes the DPI-stage palette (red / blue / green / yellow / cyan / purple)
+briefly after a stage change, then returns to a steady status/charge colour.
+The vendor M HUB build for this model exposes no lighting tab, and the lighting
+commands (`0x11 0x2B`, `0x12 0x2B`, `0x12 0x2D`) are silently ignored; `0x11
+0x1B` even returns the identity reply instead of a lighting state. The TUI
+reports this in the **STATUS LED** group and uses the same palette for its own
+accent colour where it can.
 
 ## Notes
 

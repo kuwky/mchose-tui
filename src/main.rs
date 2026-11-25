@@ -22,7 +22,7 @@ Options:
   --demo              run with a simulated L7 Ultra (no hardware needed)
   --device <path>     use this hidraw node instead of autodetection
   --no-color          disable ANSI colours
-  --accent #RRGGBB    TUI accent colour (default: follow the DPI LED colour)
+  --accent #RRGGBB    TUI accent colour (default: follow the DPI flash colour)
   --list              list MCHOSE hidraw nodes and exit
   -h, --help          show this help
   -V, --version       show the version
@@ -36,9 +36,10 @@ Keys:
 Press Enter on a button row to remap it. In the picker, type to filter,
 Up/Down to choose, Enter to apply, Esc to cancel.
 
-The mouse's bottom status LED colour is chosen by the firmware from the
-active DPI stage and cannot be changed over HID. The TUI accent can follow
-that colour or be set with --accent or the 'UI accent' row.
+The bottom LED briefly flashes the DPI-stage palette after a stage change,
+then returns to a steady status/charge colour. The firmware ignores lighting
+commands on this model, so neither colour can be set over HID. The TUI accent
+can follow the flash palette or be set with --accent or the 'UI accent' row.
 
 The mouse's configuration interface is usually root-only. Install the
 included udev rule once (./install.sh does it), then replug the mouse.
